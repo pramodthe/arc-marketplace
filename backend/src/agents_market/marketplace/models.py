@@ -58,6 +58,7 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     metadata_uri: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    icon_data_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     arc_agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     identity_tx_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)

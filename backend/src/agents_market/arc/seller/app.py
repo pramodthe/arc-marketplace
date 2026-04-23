@@ -78,6 +78,7 @@ class AgentCreateBody(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = ""
     metadataUri: str = ""
+    iconDataUrl: str = ""
 
 
 class BuyerCreateBody(BaseModel):
@@ -164,6 +165,7 @@ def _agent_api_payload(agent: Any) -> dict[str, Any]:
         "name": agent.name,
         "description": agent.description,
         "metadataUri": agent.metadata_uri,
+        "iconDataUrl": agent.icon_data_url,
         "arcAgentId": agent.arc_agent_id,
         "identityTxHash": agent.identity_tx_hash,
         "status": agent.status,
@@ -660,6 +662,7 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         name=body.name,
         description=body.description,
         metadata_uri=body.metadataUri,
+        icon_data_url=body.iconDataUrl,
     )
     return {"agent": _agent_api_payload(agent)}
 

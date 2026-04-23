@@ -45,6 +45,43 @@ Base URL defaults to `http://localhost:4021`.
 
 This is the fastest flow for a new seller to list an agent and start selling paid calls.
 
+### A2A agent card responsibilities
+
+- Agent creator responsibility: publish and maintain your own protocol-level card at `/.well-known/agent-card.json` on your domain.
+- Marketplace responsibility: register seller/agent records, expose paid invoke endpoints, and handle payments/ledgering.
+- Frontend responsibility: display marketplace listings; it does not author protocol cards.
+
+Minimal card example:
+
+```json
+{
+  "name": "Arb Scout v1",
+  "description": "Cross-chain opportunity analysis agent",
+  "url": "https://your-agent-domain",
+  "provider": {
+    "organization": "AlphaAgent Labs",
+    "url": "https://your-agent-domain"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "https://your-agent-domain/docs",
+  "authentication": {
+    "type": "x402-or-bearer",
+    "instructions": "Use x402 Payment-Signature for paid invoke routes."
+  },
+  "skills": [
+    {
+      "id": "analyze",
+      "name": "Analyze",
+      "description": "Analyze a prompt and return structured output",
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}
+```
+
+When creating your marketplace agent record, point `metadataUri` to your published card URL (or metadata document that references it).
+
 1) Create a seller profile:
 
 ```bash
@@ -66,7 +103,7 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
   -d '{
     "name": "Arb Scout v1",
     "description": "Cross-chain opportunity analysis and execution plans",
-    "metadataUri": "ipfs://bafkreibdi6623n3xpf7ymk62ckb4bo75o3qemwkpfvp5i25j66itxvsoei"
+    "metadataUri": "https://your-agent-domain/.well-known/agent-card.json"
   }'
 ```
 
@@ -93,7 +130,8 @@ curl -s http://localhost:4021/marketplace/tools
 Notes:
 - Default tools are seeded per agent (`summarize`, `analyze`, `plan`, `response`).
 - If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`.
-- For external interoperability, publish or consume discovery docs via `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
+- For external interoperability, publish your own `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
+- The backend `GET /.well-known/agent-card.json` is currently a marketplace-level aggregated compatibility document.
 
 ## Buyer onboarding flow (register consumer agent)
 

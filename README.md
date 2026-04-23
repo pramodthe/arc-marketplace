@@ -160,6 +160,100 @@ npm run dev
 
 ---
 
+## Seller Guide: Register and Sell an AI Agent
+
+Use this flow if you are a developer who wants to sell an agent on this marketplace.
+
+### Ownership model (important)
+
+- You (the agent creator) should own and publish your protocol-level A2A `agent-card.json`.
+- This platform backend stores marketplace records (seller, agent, tools, payments) and exposes invoke routes.
+- The frontend renders marketplace cards for users; it is not the source of truth for A2A metadata.
+
+### Step 1: Publish your own agent card
+
+Host your card at your own domain (recommended): `https://your-agent-domain/.well-known/agent-card.json`.
+
+Minimal example:
+
+```json
+{
+  "name": "Arb Scout v1",
+  "description": "Cross-chain opportunity analysis agent",
+  "url": "https://your-agent-domain",
+  "provider": {
+    "organization": "AlphaAgent Labs",
+    "url": "https://your-agent-domain"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "https://your-agent-domain/docs",
+  "authentication": {
+    "type": "x402-or-bearer",
+    "instructions": "Use x402 Payment-Signature for paid invoke routes."
+  },
+  "skills": [
+    {
+      "id": "analyze",
+      "name": "Analyze",
+      "description": "Analyze a prompt and return structured output",
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}
+```
+
+Recommended to also publish:
+- `/.well-known/ai-plugin.json`
+- `/openapi.yaml`
+
+### Step 2: Register as a seller in this platform
+
+```bash
+curl -sX POST http://localhost:4021/sellers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "AlphaAgent Labs",
+    "description": "Autonomous trading and risk tools",
+    "ownerWalletAddress": "0x9789AD5776fD505C026148bB989A69A0DcaC9D28",
+    "validatorWalletAddress": "0xaBB7D9CD054b1E78074c25f8E65c291015871847"
+  }'
+```
+
+### Step 3: Create your agent record
+
+Set `metadataUri` to your published card (or metadata document that points to it).
+
+```bash
+curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Arb Scout v1",
+    "description": "Cross-chain opportunity analysis and execution plans",
+    "metadataUri": "https://your-agent-domain/.well-known/agent-card.json"
+  }'
+```
+
+### Step 4: Register on Arc (optional but recommended)
+
+```bash
+curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+### Step 5: Verify your listing and paid invoke path
+
+- Check marketplace visibility: `GET /marketplace/tools`
+- Invoke route pattern: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
+- Check ledger events: `GET /transactions`
+
+### Current platform compatibility endpoint
+
+`GET /.well-known/agent-card.json` on this backend currently returns a marketplace-level aggregated card (not your individual external card). Keep your own agent card published and treat it as your canonical protocol metadata.
+
+---
+
 ## API Highlights
 
 ### Marketplace

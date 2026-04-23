@@ -1,433 +1,39 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowUpRight,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
-  Edit3,
   ExternalLink,
   KeyRound,
   Layers3,
   Link2,
+  Loader2,
   Search,
   Shield,
   UserRoundPlus,
   Wallet,
 } from "lucide-react"
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar.jsx"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar.jsx"
 import { Badge } from "@/components/ui/badge.jsx"
 import { Button } from "@/components/ui/button.jsx"
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-} from "@/components/ui/card.jsx"
+import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card.jsx"
 import { Input } from "@/components/ui/input.jsx"
 import { Separator } from "@/components/ui/separator.jsx"
+import {
+  createAgent,
+  createSeller,
+  getSeller,
+  listMarketplaceTools,
+  listSellers,
+} from "@/api/marketplaceClient.js"
+import { makeAgentCompositeId, mapMarketplaceToAgentCards } from "@/lib/agentMappers.js"
 
-const initialAgents = [
-  {
-    id: "3ehcqkqZsHxy4cicqv6948QHmCAFbD23T8xDHkgk1n7E",
-    name: "TESTAGENT",
-    shortAddress: "3ehc...1n7E",
-    wallet: "Dw7G...wFye",
-    owner: "LSDX...Wq89",
-    authority: "Cbpy...F7Rn",
-    assetType: "Core Asset",
-    status: "Active",
-    description: "I'm already dead when you reading this :'(",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: [],
-    avatar: "TA",
-    color: "from-sky-400/30 via-cyan-300/10 to-transparent",
-    holdings: [
-      { amount: "0.01001", symbol: "SOL" },
-      { amount: "0.025", symbol: "USDC" },
-    ],
-    token: "None.",
-    paymentProtocol: "x402 Not Supported",
-    registries: ["Solana", "Metaplex"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Magic Eden",
-    rawMetadata: `{
-  "agentId": "3ehcqkqZsHxy4cicqv6948QHmCAFbD23T8xDHkgk1n7E",
-  "name": "TESTAGENT",
-  "status": "active",
-  "trust": ["reputation", "crypto-economic"],
-  "wallet": "Dw7G...wFye",
-  "registry": ["solana", "metaplex"]
-}`,
-  },
-  {
-    id: "2fddM5hNJKf3sFv7jL9Qxw2kA8Cz1TUd",
-    name: "TESTAGENT",
-    shortAddress: "2fdd...TUd",
-    wallet: "DvBU...r3x1",
-    owner: "CzR3...nF28",
-    authority: "DYf7...uP9m",
-    assetType: "Core Asset",
-    status: "Active",
-    description: "I'm already dead when you reading this :'(",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: [],
-    avatar: "TA",
-    color: "from-indigo-500/30 via-violet-400/10 to-transparent",
-    holdings: [
-      { amount: "0.0084", symbol: "SOL" },
-      { amount: "10.2", symbol: "USDC" },
-    ],
-    token: "None.",
-    paymentProtocol: "x402 Not Supported",
-    registries: ["Solana", "Metaplex"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Open on Tensor",
-    rawMetadata: `{
-  "agentId": "2fddM5hNJKf3sFv7jL9Qxw2kA8Cz1TUd",
-  "name": "TESTAGENT",
-  "status": "active"
-}`,
-  },
-  {
-    id: "2L6Cn7DbmexaClaw7tt7Jf2Lmno8PQrs",
-    name: "MEXACLAW",
-    shortAddress: "2L6C...7nDb",
-    wallet: "az2z...H6c1",
-    owner: "Br6T...P2d1",
-    authority: "Fa4Q...xY89",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "They gave me a wallet. Now I'm unstoppable. Exploring what it means to truly operate in the wild.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB"],
-    avatar: "MX",
-    color: "from-amber-400/30 via-orange-400/10 to-transparent",
-    holdings: [
-      { amount: "2.401", symbol: "SOL" },
-      { amount: "480", symbol: "USDC" },
-    ],
-    token: "MEXACLAW utility token",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "ARC"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Backpack",
-    rawMetadata: `{
-  "agentId": "2L6Cn7DbmexaClaw7tt7Jf2Lmno8PQrs",
-  "name": "MEXACLAW",
-  "capabilities": ["web", "payments"]
-}`,
-  },
-  {
-    id: "7HdqR6x0degenmolt4u8mmrVjP0abC1",
-    name: "degen.molt",
-    shortAddress: "7Hdq...R6x0",
-    wallet: "60qg...RjV0",
-    owner: "A91P...be31",
-    authority: "Gh76...L0a2",
-    assetType: "Core Asset",
-    status: "Active",
-    description: "degen.molt autonomous AI agent on Solana, powered by Molt.",
-    tags: ["Reputation"],
-    categoryBadges: ["WEB", "AIA"],
-    avatar: "DM",
-    color: "from-red-500/30 via-red-400/10 to-transparent",
-    holdings: [
-      { amount: "1.113", symbol: "SOL" },
-      { amount: "90", symbol: "USDC" },
-    ],
-    token: "MOLT agent token",
-    paymentProtocol: "x402 Not Supported",
-    registries: ["Solana", "Molt"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Jupiter",
-    rawMetadata: `{
-  "agentId": "7HdqR6x0degenmolt4u8mmrVjP0abC1",
-  "provider": "molt"
-}`,
-  },
-  {
-    id: "FMuuv0Izdpo2unoahNoahClawP9m2",
-    name: "dpo2u.noah",
-    shortAddress: "FMuu...v0Iz",
-    wallet: "8oWv...2V84",
-    owner: "Qp33...dw1X",
-    authority: "Hh65...mZ73",
-    assetType: "Core Asset",
-    status: "Active",
-    description: "dpo2u = Noah Claw Agents NFT",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: [],
-    avatar: "DN",
-    color: "from-blue-500/30 via-sky-400/10 to-transparent",
-    holdings: [
-      { amount: "0.22", symbol: "SOL" },
-      { amount: "15", symbol: "USDC" },
-    ],
-    token: "No token assigned.",
-    paymentProtocol: "x402 Not Supported",
-    registries: ["Solana", "Noah"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Open on Magic Eden",
-    rawMetadata: `{
-  "agentId": "FMuuv0Izdpo2unoahNoahClawP9m2",
-  "collection": "Noah Claw Agents"
-}`,
-  },
-  {
-    id: "7sh6tTExMETAFLEXCOINa2a030token",
-    name: "METAFLEX COIN",
-    shortAddress: "7sh6...tTEx",
-    wallet: "5MHa...9tE9",
-    owner: "Cw91...kX12",
-    authority: "Nh73...Zb61",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "METAFLEX COIN is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2023-04-01", "TOKEN METAFLEX", "+2"],
-    avatar: "MC",
-    color: "from-teal-400/30 via-cyan-300/10 to-transparent",
-    holdings: [
-      { amount: "4.91", symbol: "SOL" },
-      { amount: "1200", symbol: "USDC" },
-    ],
-    token: "METAFLEX",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Magic Eden",
-    rawMetadata: `{
-  "agentId": "7sh6tTExMETAFLEXCOINa2a030token",
-  "token": "METAFLEX"
-}`,
-  },
-  {
-    id: "HDKxKpj6SolanaidolLaunchPad",
-    name: "Solana",
-    shortAddress: "HDKx...Kpj6",
-    wallet: "8Vbc...33DN",
-    owner: "Vq31...iN72",
-    authority: "Pz82...hh61",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "Solana is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2026-04-01", "TOKEN SOLANA", "+2"],
-    avatar: "SO",
-    color: "from-emerald-400/30 via-green-300/10 to-transparent",
-    holdings: [
-      { amount: "12.4", symbol: "SOL" },
-      { amount: "250", symbol: "USDC" },
-    ],
-    token: "SOLANA",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Tensor",
-    rawMetadata: `{"agentId":"HDKxKpj6SolanaidolLaunchPad","token":"SOLANA"}`,
-  },
-  {
-    id: "Apf2KiniSamAltmanIdolRegistry",
-    name: "Sam Altman",
-    shortAddress: "Apf2...Kini",
-    wallet: "Cu4j...4m9l",
-    owner: "Yq17...wV44",
-    authority: "Sx53...hf12",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "Sam Altman is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2026-04-01", "TOKEN SAMA", "+2"],
-    avatar: "SA",
-    color: "from-violet-400/30 via-fuchsia-400/10 to-transparent",
-    holdings: [
-      { amount: "3.2", symbol: "SOL" },
-      { amount: "140", symbol: "USDC" },
-    ],
-    token: "SAMA",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Jupiter",
-    rawMetadata: `{"agentId":"Apf2KiniSamAltmanIdolRegistry","token":"SAMA"}`,
-  },
-  {
-    id: "32af33gTBitcoinIdolAgent",
-    name: "Bitcoin",
-    shortAddress: "32af...33gT",
-    wallet: "Bew...goWe",
-    owner: "Mq52...sF77",
-    authority: "Nn49...cA10",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "Bitcoin is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2026-04-01", "TOKEN BTCOIN", "+2"],
-    avatar: "BT",
-    color: "from-yellow-400/30 via-amber-300/10 to-transparent",
-    holdings: [
-      { amount: "1.4", symbol: "SOL" },
-      { amount: "58", symbol: "USDC" },
-    ],
-    token: "BTCOIN",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Raydium",
-    rawMetadata: `{"agentId":"32af33gTBitcoinIdolAgent","token":"BTCOIN"}`,
-  },
-  {
-    id: "Fu4C6U0bWinAgentRegistry",
-    name: "WIN",
-    shortAddress: "Fu4C...6U0b",
-    wallet: "ST7d...Rn5N",
-    owner: "Kz81...rP31",
-    authority: "Zf26...vB67",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "WIN is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2028-04-01", "TOKEN WIN", "+2"],
-    avatar: "WN",
-    color: "from-lime-400/30 via-green-300/10 to-transparent",
-    holdings: [
-      { amount: "2.1", symbol: "SOL" },
-      { amount: "75", symbol: "USDC" },
-    ],
-    token: "WIN",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Tensor",
-    rawMetadata: `{"agentId":"Fu4C6U0bWinAgentRegistry","token":"WIN"}`,
-  },
-  {
-    id: "G4Fbu5yPIdollySmolAgent",
-    name: "IDOLLYSMOL",
-    shortAddress: "G4Fb...u5yP",
-    wallet: "24f0...E8Vp",
-    owner: "Gr15...pd82",
-    authority: "Wy84...qN72",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "IDOLLYSMOL is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2028-04-01", "TOKEN SMOL", "+2"],
-    avatar: "IS",
-    color: "from-pink-400/30 via-rose-300/10 to-transparent",
-    holdings: [
-      { amount: "6.0", symbol: "SOL" },
-      { amount: "212", symbol: "USDC" },
-    ],
-    token: "SMOL",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Jupiter",
-    rawMetadata: `{"agentId":"G4Fbu5yPIdollySmolAgent","token":"SMOL"}`,
-  },
-  {
-    id: "ApyaLXuvMINHxDYNASTYAgent",
-    name: "MINHxDYNASTY",
-    shortAddress: "Apya...LXuv",
-    wallet: "Dvaj...Kd3M",
-    owner: "Ls91...2cX4",
-    authority: "Tq49...mN16",
-    assetType: "Core Asset",
-    status: "Active",
-    description:
-      "MINHxDYNASTY is a tokenized AI idol agent on IdolifyAI, the first Solana-native AI agent launchpad.",
-    tags: ["Reputation", "Crypto-Economic"],
-    categoryBadges: ["WEB", "A2A 0.3.0", "MCP 2028-04-01", "TOKEN TCNXG", "+2"],
-    avatar: "MD",
-    color: "from-cyan-400/30 via-sky-300/10 to-transparent",
-    holdings: [
-      { amount: "1.0", symbol: "SOL" },
-      { amount: "42", symbol: "USDC" },
-    ],
-    token: "TCNXG",
-    paymentProtocol: "x402 Enabled (placeholder)",
-    registries: ["Solana", "IdolifyAI"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Backpack",
-    rawMetadata: `{"agentId":"ApyaLXuvMINHxDYNASTYAgent","token":"TCNXG"}`,
-  },
-]
-
-function formatShortAddress(value) {
-  if (!value) return "Pending"
-  if (value.length <= 10) return value
-  return `${value.slice(0, 4)}...${value.slice(-4)}`
-}
-
-function createAgentFromForm(form) {
-  const name = form.name.trim() || "Untitled Agent"
-  const wallet = form.wallet.trim() || "Pending wallet"
-  const avatar =
-    form.avatar.trim() ||
-    name
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase())
-      .join("") ||
-    "AG"
-  const categoryBadges = form.categoryBadges
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const tags = form.tags
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const id = `agent-${Date.now()}`
-
-  return {
-    id,
-    name,
-    shortAddress: formatShortAddress(wallet),
-    wallet,
-    owner: "You",
-    authority: "You",
-    assetType: "Core Asset",
-    status: form.status || "Active",
-    description: form.description.trim() || "No description provided.",
-    tags,
-    categoryBadges,
-    avatar,
-    color: "from-zinc-500/30 via-zinc-400/10 to-transparent",
-    holdings: [{ amount: "0", symbol: "SOL" }],
-    token: "None.",
-    paymentProtocol: "x402 Not Supported",
-    registries: ["Solana"],
-    explorerLabel: "View on ARC Explorer",
-    marketLabel: "Trade on Magic Eden",
-    rawMetadata: JSON.stringify(
-      {
-        agentId: id,
-        name,
-        status: form.status || "Active",
-        wallet,
-        network: form.network,
-        tags,
-        categoryBadges,
-      },
-      null,
-      2,
-    ),
-    editable: true,
-    network: form.network,
-  }
-}
+const PAGE_SIZE = 9
 
 function pushPath(pathname) {
   window.history.pushState({}, "", pathname)
@@ -452,15 +58,36 @@ function readRouteFromPath() {
   return { agentId: decodeURIComponent(match[1]), page: "detail" }
 }
 
+function normalizeSearch(value) {
+  return value.trim().toLowerCase()
+}
+
+function splitCommaValues(value) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function mergeAgentProfile(agent, override) {
+  if (!override) return agent
+  return {
+    ...agent,
+    ...override,
+    profile: {
+      ...(agent.profile || {}),
+      ...(override.profile || {}),
+    },
+  }
+}
+
 function MetricCard({ dotClassName, icon: Icon, title, children }) {
   return (
     <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">
       <CardHeader className="flex flex-row items-center gap-3 p-5 pb-4">
         <span className={`size-2 rounded-full ${dotClassName}`} />
         <Icon className="size-4 text-zinc-400" />
-        <h2 className="text-[13px] font-bold uppercase tracking-[0.05em] text-zinc-100">
-          {title}
-        </h2>
+        <h2 className="text-[13px] font-bold uppercase tracking-[0.05em] text-zinc-100">{title}</h2>
       </CardHeader>
       <CardContent className="px-5 pb-5 pt-0">{children}</CardContent>
     </Card>
@@ -472,9 +99,18 @@ function AgentCard({ agent, onOpen }) {
     <Card
       className="group cursor-pointer rounded-xl border-zinc-800 bg-zinc-950/90 text-zinc-50 shadow-none transition-colors hover:border-zinc-700"
       onClick={() => onOpen(agent)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault()
+          onOpen(agent)
+        }
+      }}
+      role="button"
+      tabIndex={0}
     >
       <CardHeader className="flex flex-row items-start gap-3 p-4 pb-3">
         <Avatar className="size-10 rounded-md border border-zinc-800">
+          {agent.avatarImage ? <AvatarImage src={agent.avatarImage} alt={`${agent.name} avatar`} /> : null}
           <AvatarFallback
             className={`rounded-md bg-gradient-to-br ${agent.color} text-[11px] font-semibold text-white`}
           >
@@ -483,9 +119,7 @@ function AgentCard({ agent, onOpen }) {
         </Avatar>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h3 className="truncate text-[13px] font-semibold text-zinc-50">
-              {agent.name}
-            </h3>
+            <h3 className="truncate text-[13px] font-semibold text-zinc-50">{agent.name}</h3>
             <span className="text-[10px] text-emerald-400">• {agent.status}</span>
           </div>
           <p className="mt-0.5 text-[10px] text-zinc-500">{agent.shortAddress}</p>
@@ -500,13 +134,7 @@ function AgentCard({ agent, onOpen }) {
             <Badge
               key={tag}
               variant="outline"
-              className={`rounded-md px-1.5 py-0 text-[9px] font-medium uppercase tracking-[0.12em] ${
-                tag === "OWNED"
-                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                  : tag === "DEVNET"
-                    ? "border-sky-500/40 bg-sky-500/10 text-sky-300"
-                    : "border-zinc-700 bg-zinc-900 text-zinc-300"
-              }`}
+              className="rounded-md border-zinc-700 bg-zinc-900 px-1.5 py-0 text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-300"
             >
               {tag}
             </Badge>
@@ -523,25 +151,6 @@ function AgentCard({ agent, onOpen }) {
             </Badge>
           ))}
         </div>
-        {agent.editable ? (
-          <div className="flex items-center justify-between border-t border-zinc-900 px-4 py-3">
-            <span className="text-[10px] uppercase tracking-[0.16em] text-zinc-500">
-              Your Agent
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 rounded-md border-zinc-800 bg-zinc-950 px-2.5 text-[10px] text-zinc-100 hover:bg-zinc-900"
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpen(agent, "edit")
-              }}
-            >
-              <Edit3 data-icon="inline-start" />
-              Edit Agent
-            </Button>
-          </div>
-        ) : null}
       </CardContent>
       <CardFooter className="flex items-center gap-2 border-t border-zinc-900 px-4 py-3 text-[10px] text-zinc-500">
         <Wallet className="size-3.5" />
@@ -551,7 +160,25 @@ function AgentCard({ agent, onOpen }) {
   )
 }
 
-function AgentListScreen({ agents, onOpen, onRegister }) {
+function AgentListScreen({
+  agents,
+  allCount,
+  query,
+  onQueryChange,
+  onOpen,
+  onRegister,
+  page,
+  pageCount,
+  isLoading,
+  loadError,
+  onRetry,
+  onPrevPage,
+  onNextPage,
+  onSelectPage,
+}) {
+  const pageStart = allCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageEnd = Math.min(page * PAGE_SIZE, allCount)
+
   return (
     <section className="mx-auto max-w-[1060px]">
       <div className="flex flex-col gap-6 border-b border-zinc-900/80 pb-7 sm:flex-row sm:items-end sm:justify-between">
@@ -560,14 +187,9 @@ function AgentListScreen({ agents, onOpen, onRegister }) {
             <Layers3 className="size-3.5 text-zinc-400" />
             Registry
           </div>
-          <div className="flex flex-wrap items-center">
-            <h1 className="text-[28px] font-semibold tracking-tight text-zinc-50">
-              Agents
-            </h1>
-          </div>
+          <h1 className="text-[28px] font-semibold tracking-tight text-zinc-50">Agents</h1>
           <p className="mt-3 max-w-xl text-[15px] leading-7 text-zinc-400">
-            On-chain registry of autonomous agents on Solana, each backed by a
-            Core asset with its own wallet.
+            On-chain registry of autonomous agents available through the Arc marketplace API.
           </p>
         </div>
         <Button
@@ -584,7 +206,7 @@ function AgentListScreen({ agents, onOpen, onRegister }) {
         <button className="border-b-2 border-[#2450ff] pb-3 text-sm font-semibold tracking-[0.02em] text-zinc-50">
           All Agents
           <Badge className="ml-2 rounded-sm bg-zinc-800 px-1.5 text-[9px] text-zinc-300 hover:bg-zinc-800">
-            {agents.length}
+            {allCount}
           </Badge>
         </button>
       </div>
@@ -593,45 +215,89 @@ function AgentListScreen({ agents, onOpen, onRegister }) {
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
           <Input
-            placeholder="Search agents by name, description, or address..."
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Search agents by name, description, wallet, or tool..."
             className="h-9 rounded-md border-zinc-800 bg-transparent pl-9 text-sm text-zinc-200 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
           />
         </div>
       </div>
 
-      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {agents.map((agent) => (
-          <AgentCard key={agent.id} agent={agent} onOpen={onOpen} />
-        ))}
-      </div>
+      {isLoading ? (
+        <div className="mt-8 flex items-center gap-2 text-sm text-zinc-400">
+          <Loader2 className="size-4 animate-spin" />
+          Loading agents from backend...
+        </div>
+      ) : null}
+
+      {loadError ? (
+        <div className="mt-8 rounded-xl border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-200">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">Could not load marketplace agents.</p>
+              <p className="mt-1 text-red-300/90">{loadError}</p>
+              <Button
+                variant="outline"
+                className="mt-3 h-8 rounded-md border-red-800 bg-red-950 px-3 text-xs text-red-100 hover:bg-red-900"
+                onClick={onRetry}
+              >
+                Retry
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {!isLoading && !loadError && agents.length === 0 ? (
+        <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-950/60 p-6 text-sm text-zinc-400">
+          No agents found for this search.
+        </div>
+      ) : null}
+
+      {!loadError ? (
+        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {agents.map((agent) => (
+            <AgentCard key={agent.id} agent={agent} onOpen={onOpen} />
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-6 flex flex-col gap-4 border-t border-zinc-950 pt-5 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
-        <p>Showing 1-{agents.length} of {agents.length} agents</p>
+        <p>
+          Showing {pageStart}-{pageEnd} of {allCount} agents
+        </p>
         <div className="flex items-center gap-1">
           <Button
             variant="outline"
             size="icon"
-            className="size-8 rounded-md border-zinc-900 bg-transparent text-zinc-500 hover:bg-zinc-950 hover:text-zinc-200"
+            disabled={page <= 1 || isLoading}
+            onClick={onPrevPage}
+            className="size-8 rounded-md border-zinc-900 bg-transparent text-zinc-500 hover:bg-zinc-950 hover:text-zinc-200 disabled:opacity-40"
           >
             <ChevronLeft />
           </Button>
-          {[1, 2, 3, 4, 5].map((page) => (
+          {Array.from({ length: pageCount }, (_, idx) => idx + 1).map((pageNumber) => (
             <Button
-              key={page}
+              key={pageNumber}
               variant="outline"
+              disabled={isLoading}
+              onClick={() => onSelectPage(pageNumber)}
               className={`size-8 rounded-md border-zinc-900 px-0 ${
-                page === 1
+                pageNumber === page
                   ? "bg-zinc-50 text-zinc-950 hover:bg-zinc-200"
                   : "bg-transparent text-zinc-300 hover:bg-zinc-950"
               }`}
             >
-              {page}
+              {pageNumber}
             </Button>
           ))}
           <Button
             variant="outline"
             size="icon"
-            className="size-8 rounded-md border-zinc-900 bg-transparent text-zinc-500 hover:bg-zinc-950 hover:text-zinc-200"
+            disabled={page >= pageCount || isLoading}
+            onClick={onNextPage}
+            className="size-8 rounded-md border-zinc-900 bg-transparent text-zinc-500 hover:bg-zinc-950 hover:text-zinc-200 disabled:opacity-40"
           >
             <ChevronRight />
           </Button>
@@ -641,19 +307,28 @@ function AgentListScreen({ agents, onOpen, onRegister }) {
   )
 }
 
-function RegisterAgentScreen({ onBack, onSubmit }) {
-  const steps = ["Identity", "Services", "Review"]
+function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
+  const steps = ["Identity", "Services", "Trust & Ops", "Review"]
   const [step, setStep] = useState(0)
   const [form, setForm] = useState({
-    network: "solana-mainnet",
     imageName: "",
-    name: "",
-    description: "",
-    status: "Active",
-    avatar: "",
+    imagePreviewDataUrl: "",
+    agentName: "",
+    agentDescription: "",
     wallet: "",
-    categoryBadges: "",
-    tags: "",
+    metadataUri: "",
+    category: "General",
+    servicesInput: "",
+    apiBaseUrl: "",
+    apiDocsUrl: "",
+    slaTier: "Standard",
+    pricingModel: "Per invocation",
+    basePriceUsdc: "",
+    trustSignalsInput: "",
+    complianceNotes: "",
+    kycStatus: "Unknown",
+    supportEmail: "",
+    payoutPolicy: "",
   })
 
   function updateField(key, value) {
@@ -669,48 +344,39 @@ function RegisterAgentScreen({ onBack, onSubmit }) {
       onBack()
       return
     }
-
     setStep((current) => Math.max(current - 1, 0))
+  }
+
+  function finishRegistration() {
+    onSubmit(form)
+  }
+
+  function handleImageChange(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    updateField("imageName", file.name)
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      updateField("imagePreviewDataUrl", typeof reader.result === "string" ? reader.result : "")
+    }
+    reader.readAsDataURL(file)
   }
 
   const progress = ((step + 1) / steps.length) * 100
   const initials =
-    form.avatar.trim() ||
-    form.name
+    form.agentName
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
       .map((part) => part[0]?.toUpperCase())
-      .join("") ||
-    "AG"
-  const reviewBadges = form.categoryBadges
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const reviewTags = form.tags
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-  function finishRegistration() {
-    onSubmit(createAgentFromForm(form))
-  }
+      .join("") || "AG"
 
   return (
     <section className="mx-auto max-w-[860px] py-8">
       <div className="rounded-[28px] border border-zinc-800 bg-[#0f0f10] px-6 py-7 shadow-none sm:px-8">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <h1 className="text-[24px] font-semibold tracking-tight text-zinc-50">
-            Create Agent
-          </h1>
-          <select
-            value={form.network}
-            onChange={(event) => updateField("network", event.target.value)}
-            className="h-10 rounded-xl border border-zinc-800 bg-[#111214] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-          >
-            <option>solana-mainnet</option>
-            <option>solana-devnet</option>
-          </select>
+        <div className="flex flex-col gap-4">
+          <h1 className="text-[24px] font-semibold tracking-tight text-zinc-50">Create Agent</h1>
         </div>
 
         <div className="mt-5 flex flex-wrap gap-2">
@@ -729,188 +395,262 @@ function RegisterAgentScreen({ onBack, onSubmit }) {
         </div>
 
         <div className="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
-          <div
-            className="h-full bg-[#2450ff] transition-all"
-            style={{ width: `${progress}%` }}
-          />
+          <div className="h-full bg-[#2450ff] transition-all" style={{ width: `${progress}%` }} />
         </div>
+
+        {submitError ? (
+          <div className="mt-5 rounded-xl border border-red-900/60 bg-red-950/20 p-3 text-sm text-red-200">
+            {submitError}
+          </div>
+        ) : null}
 
         <div className="mt-8">
           {step === 0 ? (
-            <div>
-              <h2 className="text-[22px] font-medium text-zinc-50">Agent Identity</h2>
-              <p className="mt-2 text-[15px] text-zinc-400">
-                Set up the on-chain identity for your agent.
-              </p>
-
-              <div className="mt-8 space-y-6">
-                <div>
-                  <label className="mb-3 block text-[16px] text-zinc-100">Image</label>
-                  <label className="flex min-h-[140px] cursor-pointer items-center justify-center rounded-2xl border border-dashed border-zinc-800 bg-[#111111] px-6 text-center">
-                    <input
-                      type="file"
-                      className="hidden"
-                      onChange={(event) =>
-                        updateField("imageName", event.target.files?.[0]?.name ?? "")
-                      }
-                    />
-                    <div>
-                      <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-zinc-700 text-zinc-500">
+            <div className="space-y-6">
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">Agent Icon (optional)</span>
+                <label className="flex min-h-[120px] cursor-pointer items-center justify-center rounded-2xl border border-dashed border-zinc-800 bg-[#111111] px-6 text-center">
+                  <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
+                  <div>
+                    {form.imagePreviewDataUrl ? (
+                      <img
+                        src={form.imagePreviewDataUrl}
+                        alt="Agent icon preview"
+                        className="mx-auto mb-3 h-12 w-12 rounded-xl border border-zinc-700 object-cover"
+                      />
+                    ) : (
+                      <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-xl border border-zinc-700 text-zinc-500">
                         +
                       </div>
-                      <p className="text-sm text-zinc-400">
-                        {form.imageName || "Click or drag to upload (JPEG, PNG, WebP, GIF)"}
-                      </p>
-                    </div>
-                  </label>
-                </div>
-
-                <label className="block">
-                  <span className="mb-3 block text-[16px] text-zinc-100">
-                    Name <span className="text-red-400">*</span>
-                  </span>
-                  <Input
-                    value={form.name}
-                    onChange={(event) => updateField("name", event.target.value)}
-                    className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
+                    )}
+                    <p className="text-sm text-zinc-400">
+                      {form.imageName || "Click to upload PNG/JPG/WebP/GIF"}
+                    </p>
+                  </div>
                 </label>
-
-                <label className="block">
-                  <span className="mb-3 block text-[16px] text-zinc-100">
-                    Description <span className="text-red-400">*</span>
-                  </span>
-                  <textarea
-                    value={form.description}
-                    onChange={(event) => updateField("description", event.target.value)}
-                    className="min-h-[140px] w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 py-3 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-500 focus:border-zinc-700"
-                  />
-                </label>
-              </div>
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Agent Name <span className="text-red-400">*</span>
+                </span>
+                <Input
+                  value={form.agentName}
+                  onChange={(event) => updateField("agentName", event.target.value)}
+                  placeholder="Liquidity Sentinel"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Agent Description <span className="text-red-400">*</span>
+                </span>
+                <textarea
+                  value={form.agentDescription}
+                  onChange={(event) => updateField("agentDescription", event.target.value)}
+                  className="min-h-[140px] w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 py-3 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                />
+              </label>
             </div>
           ) : null}
 
           {step === 1 ? (
-            <div>
-              <h2 className="text-[22px] font-medium text-zinc-50">Agent Services</h2>
-              <p className="mt-2 text-[15px] text-zinc-400">
-                Add the fields used by the cards on the registry page.
-              </p>
-
-              <div className="mt-8 grid gap-5 sm:grid-cols-2">
-                <label className="block">
-                  <span className="mb-3 block text-[16px] text-zinc-100">Status</span>
-                  <select
-                    value={form.status}
-                    onChange={(event) => updateField("status", event.target.value)}
-                    className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-                  >
-                    <option>Active</option>
-                    <option>Owned</option>
-                    <option>Draft</option>
-                  </select>
-                </label>
-
-                <label className="block">
-                  <span className="mb-3 block text-[16px] text-zinc-100">Avatar Initials</span>
-                  <Input
-                    value={form.avatar}
-                    onChange={(event) => updateField("avatar", event.target.value.toUpperCase())}
-                    placeholder="AN"
-                    className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </label>
-
-                <label className="block sm:col-span-2">
-                  <span className="mb-3 block text-[16px] text-zinc-100">Wallet Address</span>
-                  <Input
-                    value={form.wallet}
-                    onChange={(event) => updateField("wallet", event.target.value)}
-                    placeholder="Dw7G...wFye"
-                    className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </label>
-
-                <label className="block sm:col-span-2">
-                  <span className="mb-3 block text-[16px] text-zinc-100">
-                    Category Badges
-                  </span>
-                  <Input
-                    value={form.categoryBadges}
-                    onChange={(event) => updateField("categoryBadges", event.target.value)}
-                    placeholder="OWNED, DEVNET, WEB"
-                    className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </label>
-
-                <label className="block sm:col-span-2">
-                  <span className="mb-3 block text-[16px] text-zinc-100">Service Tags</span>
-                  <Input
-                    value={form.tags}
-                    onChange={(event) => updateField("tags", event.target.value)}
-                    placeholder="Reputation, Crypto-Economic"
-                    className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-0 focus-visible:ring-offset-0"
-                  />
-                </label>
-              </div>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Wallet Address (identity + payouts)
+                </span>
+                <Input
+                  value={form.wallet}
+                  onChange={(event) => updateField("wallet", event.target.value)}
+                  placeholder="0x..."
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+                <p className="mt-2 text-xs text-zinc-500">
+                  Used to identify seller and receive payments in this demo.
+                </p>
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Metadata Link (optional, advanced)
+                </span>
+                <Input
+                  value={form.metadataUri}
+                  onChange={(event) => updateField("metadataUri", event.target.value)}
+                  placeholder="ipfs://..."
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+                <p className="mt-2 text-xs text-zinc-500">
+                  Optional URI with extra profile data (for future integrations).
+                </p>
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">Category</span>
+                <Input
+                  value={form.category}
+                  onChange={(event) => updateField("category", event.target.value)}
+                  placeholder="Analytics"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">SLA Tier</span>
+                <select
+                  value={form.slaTier}
+                  onChange={(event) => updateField("slaTier", event.target.value)}
+                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                >
+                  <option>Standard</option>
+                  <option>Priority</option>
+                  <option>Enterprise</option>
+                </select>
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Services Offered (comma separated)
+                </span>
+                <Input
+                  value={form.servicesInput}
+                  onChange={(event) => updateField("servicesInput", event.target.value)}
+                  placeholder="Summarize, Analyze, Risk Scoring"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">API Base URL</span>
+                <Input
+                  value={form.apiBaseUrl}
+                  onChange={(event) => updateField("apiBaseUrl", event.target.value)}
+                  placeholder="https://api.example.com"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">API Docs URL</span>
+                <Input
+                  value={form.apiDocsUrl}
+                  onChange={(event) => updateField("apiDocsUrl", event.target.value)}
+                  placeholder="https://docs.example.com"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">Pricing Model</span>
+                <select
+                  value={form.pricingModel}
+                  onChange={(event) => updateField("pricingModel", event.target.value)}
+                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                >
+                  <option>Per invocation</option>
+                  <option>Monthly subscription</option>
+                  <option>Tiered usage</option>
+                  <option>Custom contract</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">Base Price (USDC)</span>
+                <Input
+                  value={form.basePriceUsdc}
+                  onChange={(event) => updateField("basePriceUsdc", event.target.value)}
+                  placeholder="0.01"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
             </div>
           ) : null}
 
           {step === 2 ? (
-            <div>
-              <h2 className="text-[22px] font-medium text-zinc-50">Review</h2>
-              <p className="mt-2 text-[15px] text-zinc-400">
-                Preview how this entry maps to a registry card.
-              </p>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Trust Signals (comma separated)
+                </span>
+                <Input
+                  value={form.trustSignalsInput}
+                  onChange={(event) => updateField("trustSignalsInput", event.target.value)}
+                  placeholder="SOC2, Human Review, Reputation Score"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">KYC / Validation Status</span>
+                <select
+                  value={form.kycStatus}
+                  onChange={(event) => updateField("kycStatus", event.target.value)}
+                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                >
+                  <option>Unknown</option>
+                  <option>Pending</option>
+                  <option>Verified</option>
+                  <option>Not required</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-3 block text-[16px] text-zinc-100">Support Email</span>
+                <Input
+                  value={form.supportEmail}
+                  onChange={(event) => updateField("supportEmail", event.target.value)}
+                  placeholder="support@example.com"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">Compliance Notes</span>
+                <textarea
+                  value={form.complianceNotes}
+                  onChange={(event) => updateField("complianceNotes", event.target.value)}
+                  className="min-h-[100px] w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 py-3 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                />
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">Payout Policy</span>
+                <Input
+                  value={form.payoutPolicy}
+                  onChange={(event) => updateField("payoutPolicy", event.target.value)}
+                  placeholder="Instant settlement to seller wallet"
+                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                />
+              </label>
+            </div>
+          ) : null}
 
-              <div className="mt-8 rounded-2xl border border-zinc-800 bg-[#111111] p-5">
-                <div className="flex items-start gap-4">
-                  <div className="flex size-14 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-lg font-semibold text-zinc-50">
-                    {initials}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="truncate text-xl font-semibold text-zinc-50">
-                        {form.name || "Agent Name"}
-                      </h3>
-                      <span className="text-sm text-emerald-400">• {form.status}</span>
-                    </div>
-                    <p className="mt-2 text-sm text-zinc-500">
-                      {form.wallet || "Wallet address"}
-                    </p>
-                    <p className="mt-4 text-sm leading-6 text-zinc-400">
-                      {form.description || "Agent description"}
-                    </p>
-                  </div>
+          {step === 3 ? (
+            <div className="rounded-2xl border border-zinc-800 bg-[#111111] p-5">
+              <div className="flex items-start gap-4">
+                <div className="flex size-14 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-lg font-semibold text-zinc-50">
+                  {form.imagePreviewDataUrl ? (
+                    <img
+                      src={form.imagePreviewDataUrl}
+                      alt="Agent preview icon"
+                      className="size-14 rounded-2xl object-cover"
+                    />
+                  ) : (
+                    initials
+                  )}
                 </div>
-
-                {reviewBadges.length ? (
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {reviewBadges.map((badge) => (
-                      <Badge
-                        key={badge}
-                        variant="outline"
-                        className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-zinc-300"
-                      >
-                        {badge}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : null}
-
-                {reviewTags.length ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {reviewTags.map((tag) => (
-                      <Badge
-                        key={tag}
-                        variant="outline"
-                        className="rounded-md border-zinc-700 bg-transparent px-2 py-0.5 text-[11px] text-zinc-300"
-                      >
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : null}
+                <div className="min-w-0 flex-1">
+                  <h3 className="truncate text-xl font-semibold text-zinc-50">
+                    {form.agentName || "Agent Name"}
+                  </h3>
+                  <p className="mt-2 text-sm text-zinc-500">{form.wallet || "Wallet address"}</p>
+                  <p className="mt-4 text-sm leading-6 text-zinc-400">
+                    {form.agentDescription || "Agent description"}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 text-sm text-zinc-300 sm:grid-cols-2">
+                <p>
+                  <span className="text-zinc-500">Seller:</span>{" "}
+                  {(form.agentName.trim() && `${form.agentName.trim()} Studio`) || "Auto-generated"}
+                </p>
+                <p>
+                  <span className="text-zinc-500">Category:</span> {form.category || "General"}
+                </p>
+                <p>
+                  <span className="text-zinc-500">Pricing:</span> {form.pricingModel}
+                </p>
+                <p>
+                  <span className="text-zinc-500">Base Price:</span> {form.basePriceUsdc || "Not set"} USDC
+                </p>
               </div>
             </div>
           ) : null}
@@ -921,14 +661,25 @@ function RegisterAgentScreen({ onBack, onSubmit }) {
             variant="secondary"
             className="h-10 rounded-lg bg-zinc-800 px-4 text-zinc-100 hover:bg-zinc-700"
             onClick={previousStep}
+            disabled={isSubmitting}
           >
             {step === 0 ? "Back" : "Previous"}
           </Button>
           <Button
             className="h-10 rounded-lg bg-zinc-50 px-5 text-zinc-950 hover:bg-zinc-200"
             onClick={step === steps.length - 1 ? finishRegistration : nextStep}
+            disabled={isSubmitting}
           >
-            {step === steps.length - 1 ? "Finish" : "Continue"}
+            {isSubmitting ? (
+              <>
+                <Loader2 className="size-4 animate-spin" />
+                Creating...
+              </>
+            ) : step === steps.length - 1 ? (
+              "Finish"
+            ) : (
+              "Continue"
+            )}
           </Button>
         </div>
       </div>
@@ -943,18 +694,14 @@ function DetailRow({ icon: Icon, label, value }) {
         <Icon className="size-3.5" />
         <span>{label}</span>
       </div>
-      <button className="inline-flex items-center gap-1.5 font-mono text-zinc-100 transition-colors hover:text-zinc-300">
-        {value}
-        <Copy className="size-3" />
-        <ExternalLink className="size-3" />
-      </button>
+      <span className="font-mono text-zinc-100">{value}</span>
     </div>
   )
 }
 
 function AgentEditScreen({ agent, onBack }) {
   return (
-    <section className="mx-auto max-w-[1060px] px-0 py-8">
+    <section className="mx-auto max-w-[860px] py-8">
       <button
         onClick={onBack}
         className="mb-6 inline-flex items-center gap-1.5 text-sm text-zinc-400 transition-colors hover:text-zinc-100"
@@ -963,141 +710,27 @@ function AgentEditScreen({ agent, onBack }) {
         Back to Registry
       </button>
 
-      <div className="flex items-start gap-5">
-        <Avatar className="size-[84px] rounded-[22px] border border-zinc-800 bg-zinc-900">
-          <AvatarFallback
-            className={`rounded-[22px] bg-gradient-to-br ${agent.color} text-2xl font-semibold text-white`}
-          >
-            {agent.avatar}
-          </AvatarFallback>
-        </Avatar>
-        <div className="min-w-0 flex-1 space-y-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="truncate text-[42px] font-bold leading-none tracking-tight text-zinc-50">
-              {agent.name}
-            </h1>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
-            <button className="inline-flex items-center gap-1.5 font-mono transition-colors hover:text-zinc-200">
-              {agent.shortAddress}
-              <Copy className="size-3.5" />
-            </button>
-            <span>·</span>
-            <span>{agent.assetType}</span>
-          </div>
-          <p className="max-w-3xl text-[15px] leading-7 text-zinc-300">{agent.description}</p>
-        </div>
-      </div>
-
-      <div className="mt-7 grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="space-y-6 lg:col-span-8">
-          <MetricCard dotClassName="bg-blue-500" icon={Wallet} title="Agent Holdings">
-            <button className="inline-flex items-center gap-1.5 text-xs font-mono text-zinc-400 transition-colors hover:text-zinc-200">
-              {agent.wallet}
-              <Copy className="size-3" />
-            </button>
-            <div className="mt-5 flex flex-wrap gap-3">
-              {agent.holdings.map((holding) => (
-                <div
-                  key={holding.symbol}
-                  className="rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-200"
-                >
-                  <span className="font-medium">{holding.amount}</span>{" "}
-                  <span className="text-zinc-400">{holding.symbol}</span>
-                </div>
-              ))}
-            </div>
-          </MetricCard>
-
-          <MetricCard dotClassName="bg-amber-500" icon={Link2} title="Agent Token">
-            <p className="text-zinc-300">{agent.token}</p>
-          </MetricCard>
-
-          <MetricCard dotClassName="bg-violet-500" icon={Layers3} title="Registrations">
-            <div className="space-y-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                    Agent ID
-                  </p>
-                </div>
-                <button className="inline-flex items-center gap-1.5 font-mono text-sm text-zinc-100 transition-colors hover:text-zinc-300">
-                  {agent.shortAddress}
-                  <Copy className="size-3" />
-                </button>
-              </div>
-              <div className="flex items-start justify-between gap-4">
-                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                  Registry
-                </p>
-                <div className="flex flex-wrap justify-end gap-2">
-                  {agent.registries.map((registry) => (
-                    <Badge
-                      key={registry}
-                      variant="outline"
-                      className="border-violet-500/40 bg-violet-500/10 text-violet-300"
-                    >
-                      {registry}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </MetricCard>
-
-          <div className="rounded-2xl border border-zinc-800 bg-[#0d0d0d]">
-            <details>
-              <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm text-zinc-400 transition-colors hover:text-zinc-100">
-                <ChevronDown className="size-4" />
-                <Copy className="size-4" />
-                <span className="font-medium uppercase tracking-[0.04em]">
-                  Raw EIP-8004 Metadata
-                </span>
-              </summary>
-              <pre className="overflow-x-auto border-t border-zinc-800 px-4 py-4 text-xs text-zinc-400">
-                {agent.rawMetadata}
-              </pre>
-            </details>
-          </div>
-        </div>
-
-        <div className="space-y-6 lg:col-span-4">
-          <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none lg:sticky lg:top-6">
-            <CardHeader className="flex flex-row items-center gap-3 p-5 pb-4">
-              <span className="size-2 rounded-full bg-blue-500" />
-              <Link2 className="size-4 text-zinc-400" />
-              <h2 className="text-[13px] font-bold uppercase tracking-[0.05em] text-zinc-100">
-                On-Chain Details
-              </h2>
-            </CardHeader>
-            <CardContent className="px-5 pb-5 pt-0">
-              <div className="divide-y divide-zinc-800">
-                <DetailRow icon={Layers3} label="Core Asset" value={agent.shortAddress} />
-                <DetailRow icon={Wallet} label="Agent Wallet" value={agent.wallet} />
-                <DetailRow icon={UserRoundPlus} label="Owner" value={agent.owner} />
-                <DetailRow icon={KeyRound} label="Authority" value={agent.authority} />
-              </div>
-
-              <div className="space-y-2 pt-6">
-                <Button
-                  variant="outline"
-                  className="h-8 w-full justify-center gap-1.5 rounded-md border-zinc-800 bg-zinc-950 text-xs text-zinc-100 hover:bg-zinc-900"
-                >
-                  <ExternalLink data-icon="inline-start" />
-                  View on Metaplex Explorer
-                </Button>
-                <Button
-                  variant="outline"
-                  className="h-8 w-full justify-center gap-1.5 rounded-md border-zinc-800 bg-zinc-950 text-xs text-zinc-100 hover:bg-zinc-900"
-                >
-                  <ArrowUpRight data-icon="inline-start" />
-                  Trade on Magic Eden
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">
+        <CardHeader className="space-y-2 p-6">
+          <h1 className="text-xl font-semibold">Edit is not available yet</h1>
+          <p className="text-sm text-zinc-400">
+            The backend currently exposes create/list endpoints, but no update endpoint for sellers or
+            agents. This screen is kept as a guard so API-backed edit can be enabled once PATCH support
+            is added.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3 p-6 pt-0 text-sm text-zinc-300">
+          <p>
+            <span className="text-zinc-500">Agent:</span> {agent.name}
+          </p>
+          <p>
+            <span className="text-zinc-500">Status:</span> {agent.status}
+          </p>
+          <p>
+            <span className="text-zinc-500">Seller:</span> {agent.owner}
+          </p>
+        </CardContent>
+      </Card>
     </section>
   )
 }
@@ -1115,6 +748,7 @@ function AgentDetailScreen({ agent, onBack }) {
 
       <div className="flex items-start gap-5">
         <Avatar className="size-[84px] rounded-[22px] border border-zinc-800 bg-zinc-900">
+          {agent.avatarImage ? <AvatarImage src={agent.avatarImage} alt={`${agent.name} avatar`} /> : null}
           <AvatarFallback
             className={`rounded-[22px] bg-gradient-to-br ${agent.color} text-2xl font-semibold text-white`}
           >
@@ -1131,24 +765,20 @@ function AgentDetailScreen({ agent, onBack }) {
             </Badge>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
-            <button className="inline-flex items-center gap-1.5 font-mono transition-colors hover:text-zinc-200">
+            <span className="inline-flex items-center gap-1.5 font-mono">
               {agent.shortAddress}
               <Copy className="size-3.5" />
-            </button>
+            </span>
             <span>·</span>
             <span>{agent.assetType}</span>
           </div>
           <p className="max-w-3xl text-[15px] leading-7 text-zinc-300">{agent.description}</p>
           <div className="flex flex-wrap gap-3 pt-1">
-            {agent.tags.map((tag, index) => (
+            {agent.tags.map((tag) => (
               <Badge
                 key={tag}
                 variant="outline"
-                className={`rounded-md px-3 py-1 text-[13px] ${
-                  index === 0
-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                    : "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                }`}
+                className="rounded-md border-violet-500/40 bg-violet-500/10 px-3 py-1 text-[13px] text-violet-300"
               >
                 {tag}
               </Badge>
@@ -1159,94 +789,85 @@ function AgentDetailScreen({ agent, onBack }) {
 
       <div className="mt-7 grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-6 lg:col-span-8">
-          <MetricCard dotClassName="bg-blue-500" icon={Wallet} title="Agent Holdings">
-            <button className="inline-flex items-center gap-1.5 text-xs font-mono text-zinc-400 transition-colors hover:text-zinc-200">
-              {agent.wallet}
-              <Copy className="size-3" />
-            </button>
-            <div className="mt-5 flex flex-wrap gap-3">
-              {agent.holdings.map((holding) => (
-                <div
-                  key={holding.symbol}
-                  className="rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-200"
+          <MetricCard dotClassName="bg-blue-500" icon={Wallet} title="Service Catalog">
+            <div className="mt-1 flex flex-wrap gap-3">
+              {(agent.profile?.services || []).map((service) => (
+                <Badge
+                  key={service}
+                  variant="outline"
+                  className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300"
                 >
-                  <span className="font-medium">{holding.amount}</span>{" "}
-                  <span className="text-zinc-400">{holding.symbol}</span>
-                </div>
+                  {service}
+                </Badge>
               ))}
+            </div>
+            <Separator className="my-4 bg-zinc-800" />
+            <div className="grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
+              <p>
+                <span className="text-zinc-500">API Base:</span> {agent.profile?.apiBaseUrl}
+              </p>
+              <p>
+                <span className="text-zinc-500">API Docs:</span> {agent.profile?.apiDocsUrl}
+              </p>
+              <p>
+                <span className="text-zinc-500">Category:</span> {agent.profile?.category}
+              </p>
+              <p>
+                <span className="text-zinc-500">SLA Tier:</span> {agent.profile?.slaTier}
+              </p>
             </div>
           </MetricCard>
 
-          <MetricCard dotClassName="bg-amber-500" icon={Link2} title="Agent Token">
-            <p className="text-zinc-300">{agent.token}</p>
+          <MetricCard dotClassName="bg-amber-500" icon={Layers3} title="Commercial Terms">
+            <div className="space-y-4">
+              <div className="grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
+                <p>
+                  <span className="text-zinc-500">Pricing Model:</span> {agent.profile?.pricingModel}
+                </p>
+                <p>
+                  <span className="text-zinc-500">Base Price (USDC):</span> {agent.profile?.basePriceUsdc}
+                </p>
+                <p className="sm:col-span-2">
+                  <span className="text-zinc-500">Payout Policy:</span> {agent.profile?.payoutPolicy}
+                </p>
+              </div>
+            </div>
           </MetricCard>
 
-          <MetricCard dotClassName="bg-emerald-500" icon={Shield} title="Trust & Security">
+          <MetricCard dotClassName="bg-emerald-500" icon={Shield} title="Trust & Compliance">
             <div className="space-y-4">
               <div>
-                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                  Trust Mechanisms
-                </p>
-                <div className="mt-3 flex flex-wrap gap-3">
-                  {agent.tags.length ? (
-                    agent.tags.map((tag, index) => (
-                      <Badge
-                        key={tag}
-                        variant="outline"
-                        className={`rounded-md px-3 py-1 text-[13px] ${
-                          index === 0
-                            ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                            : "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                        }`}
-                      >
-                        {tag}
-                      </Badge>
-                    ))
-                  ) : (
-                    <span className="text-sm text-zinc-500">No trust mechanisms declared.</span>
-                  )}
+                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">Trust Signals</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(agent.profile?.trustSignals || []).map((signal) => (
+                    <Badge
+                      key={signal}
+                      variant="outline"
+                      className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300"
+                    >
+                      {signal}
+                    </Badge>
+                  ))}
                 </div>
               </div>
               <Separator className="bg-zinc-800" />
               <div>
-                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                  Payment Protocol
-                </p>
+                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">Payment Protocol</p>
                 <div className="mt-3 inline-flex rounded-md bg-zinc-800 px-4 py-2 text-sm text-zinc-300">
                   {agent.paymentProtocol}
                 </div>
               </div>
-            </div>
-          </MetricCard>
-
-          <MetricCard dotClassName="bg-violet-500" icon={Layers3} title="Registrations">
-            <div className="space-y-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                    Agent ID
-                  </p>
-                </div>
-                <button className="inline-flex items-center gap-1.5 font-mono text-sm text-zinc-100 transition-colors hover:text-zinc-300">
-                  {agent.shortAddress}
-                  <Copy className="size-3" />
-                </button>
-              </div>
-              <div className="flex items-start justify-between gap-4">
-                <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">
-                  Registry
+              <div className="grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
+                <p>
+                  <span className="text-zinc-500">KYC Status:</span> {agent.profile?.kycStatus}
                 </p>
-                <div className="flex flex-wrap justify-end gap-2">
-                  {agent.registries.map((registry) => (
-                    <Badge
-                      key={registry}
-                      variant="outline"
-                      className="border-violet-500/40 bg-violet-500/10 text-violet-300"
-                    >
-                      {registry}
-                    </Badge>
-                  ))}
-                </div>
+                <p>
+                  <span className="text-zinc-500">Support:</span> {agent.profile?.supportEmail}
+                </p>
+                <p className="sm:col-span-2">
+                  <span className="text-zinc-500">Compliance Notes:</span>{" "}
+                  {agent.profile?.complianceNotes}
+                </p>
               </div>
             </div>
           </MetricCard>
@@ -1254,10 +875,9 @@ function AgentDetailScreen({ agent, onBack }) {
           <div className="rounded-2xl border border-zinc-800 bg-[#0d0d0d]">
             <details>
               <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm text-zinc-400 transition-colors hover:text-zinc-100">
+                <ChevronDown className="size-4" />
                 <Copy className="size-4" />
-                <span className="font-medium uppercase tracking-[0.04em]">
-                  Raw EIP-8004 Metadata
-                </span>
+                <span className="font-medium uppercase tracking-[0.04em]">Raw Metadata</span>
               </summary>
               <pre className="overflow-x-auto border-t border-zinc-800 px-4 py-4 text-xs text-zinc-400">
                 {agent.rawMetadata}
@@ -1277,49 +897,15 @@ function AgentDetailScreen({ agent, onBack }) {
             </CardHeader>
             <CardContent className="px-5 pb-5 pt-0">
               <div className="divide-y divide-zinc-800">
-                <DetailRow icon={Layers3} label="Core Asset" value={agent.shortAddress} />
-                <DetailRow icon={Wallet} label="Agent Wallet" value={agent.wallet} />
-                <DetailRow icon={UserRoundPlus} label="Owner" value={agent.owner} />
+                <DetailRow icon={Layers3} label="Composite Agent ID" value={agent.id} />
+                <DetailRow icon={Wallet} label="Seller Wallet" value={agent.wallet} />
+                <DetailRow icon={UserRoundPlus} label="Seller" value={agent.owner} />
                 <DetailRow icon={KeyRound} label="Authority" value={agent.authority} />
               </div>
-
-              <div className="pt-4">
-                <div className="flex items-center justify-between py-2 text-xs">
-                  <span className="text-zinc-400">Active</span>
-                  <span className="text-zinc-100">
-                    {agent.status.toLowerCase() === "active" ? "true" : "false"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-3 py-2 text-xs">
-                  <span className="text-zinc-400">Supported Trust</span>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    {agent.tags.length ? (
-                      agent.tags.map((tag, index) => (
-                        <Badge
-                          key={tag}
-                          variant="outline"
-                          className={`text-[11px] ${
-                            index === 0
-                              ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                              : "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                          }`}
-                        >
-                          {tag}
-                        </Badge>
-                      ))
-                    ) : (
-                      <span className="text-zinc-500">None</span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center justify-between py-2 text-xs">
-                  <span className="text-zinc-400">x402 Support</span>
-                  <span className="text-zinc-100">
-                    {agent.paymentProtocol.includes("Not") ? "No" : "Yes"}
-                  </span>
-                </div>
+              <div className="pt-4 text-xs text-zinc-500">
+                Some advanced fields are currently UI placeholders until backend persistence endpoints are
+                added.
               </div>
-
               <div className="space-y-2 pt-4">
                 <Button
                   variant="outline"
@@ -1345,20 +931,61 @@ function AgentDetailScreen({ agent, onBack }) {
 }
 
 export default function App() {
-  const [agents, setAgents] = useState(initialAgents)
+  const [agents, setAgents] = useState([])
+  const [agentUiOverrides, setAgentUiOverrides] = useState({})
   const [routeState, setRouteState] = useState(() => readRouteFromPath())
-  const selectedAgent = agents.find((agent) => agent.id === routeState?.agentId) ?? null
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState("")
+  const [query, setQuery] = useState("")
+  const [page, setPage] = useState(1)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState("")
+  const mergedAgents = useMemo(
+    () => agents.map((agent) => mergeAgentProfile(agent, agentUiOverrides[agent.id])),
+    [agentUiOverrides, agents],
+  )
+  const selectedAgent = mergedAgents.find((agent) => agent.id === routeState?.agentId) ?? null
+
+  async function refreshAgents({ showLoading = true } = {}) {
+    if (showLoading) setIsLoading(true)
+    setLoadError("")
+
+    try {
+      const tools = await listMarketplaceTools()
+      const sellers = await listSellers()
+      const sellerDetailEntries = await Promise.all(
+        sellers.map(async (seller) => {
+          try {
+            return await getSeller(seller.id)
+          } catch {
+            return null
+          }
+        }),
+      )
+
+      const sellerDetailsById = Object.fromEntries(
+        sellerDetailEntries
+          .filter((detail) => detail?.seller?.id != null)
+          .map((detail) => [detail.seller.id, detail]),
+      )
+
+      setAgents(mapMarketplaceToAgentCards({ tools, sellerDetailsById }))
+    } catch (error) {
+      setLoadError(error.message || "Unknown error while fetching agents.")
+      setAgents([])
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
   useEffect(() => {
-    const handlePopState = () => {
-      setRouteState(readRouteFromPath())
-    }
+    refreshAgents()
+  }, [])
 
+  useEffect(() => {
+    const handlePopState = () => setRouteState(readRouteFromPath())
     window.addEventListener("popstate", handlePopState)
-
-    return () => {
-      window.removeEventListener("popstate", handlePopState)
-    }
+    return () => window.removeEventListener("popstate", handlePopState)
   }, [])
 
   useEffect(() => {
@@ -1370,16 +997,26 @@ export default function App() {
           : "ARC-Agents"
   }, [routeState?.page, selectedAgent])
 
-  function openAgent(agent, page = "detail") {
-    const basePath = `/agents/${encodeURIComponent(agent.id)}`
-    const pathname =
-      page === "edit"
-        ? `${basePath}/edit${agent.network ? `?network=${agent.network}` : ""}`
-        : basePath
+  useEffect(() => {
+    setPage(1)
+  }, [query])
 
+  const filteredAgents = useMemo(() => {
+    const normalized = normalizeSearch(query)
+    if (!normalized) return mergedAgents
+    return mergedAgents.filter((agent) => agent.searchableText.includes(normalized))
+  }, [mergedAgents, query])
+
+  const pageCount = Math.max(1, Math.ceil(filteredAgents.length / PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount)
+  const pagedAgents = filteredAgents.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+
+  function openAgent(agent, pageName = "detail") {
+    const basePath = `/agents/${encodeURIComponent(agent.id)}`
+    const pathname = pageName === "edit" ? `${basePath}/edit` : basePath
     pushPath(pathname)
     scrollToTop()
-    setRouteState({ agentId: agent.id, page })
+    setRouteState({ agentId: agent.id, page: pageName })
   }
 
   function goBackToRegistry() {
@@ -1389,17 +1026,73 @@ export default function App() {
   }
 
   function openRegisterScreen() {
+    setSubmitError("")
     pushPath("/agents/register")
     scrollToTop()
     setRouteState({ page: "register" })
   }
 
-  function registerAgent(agent) {
-    setAgents((current) => [agent, ...current])
-    const pathname = `/agents/${encodeURIComponent(agent.id)}`
-    pushPath(pathname)
-    scrollToTop()
-    setRouteState({ agentId: agent.id, page: "detail" })
+  async function registerAgent(form) {
+    setIsSubmitting(true)
+    setSubmitError("")
+
+    try {
+      const walletAddress = form.wallet.trim() || `demo-wallet-${Date.now()}`
+      const agentName = form.agentName.trim() || "Untitled Agent"
+      const agentDescription = form.agentDescription.trim() || ""
+      const seller = await createSeller({
+        name: `${agentName} Studio`,
+        description: `Seller profile for ${agentName}`,
+        ownerWalletAddress: walletAddress,
+        validatorWalletAddress: "",
+      })
+
+      const agent = await createAgent(seller.id, {
+        name: agentName,
+        description: agentDescription,
+        metadataUri: form.metadataUri.trim(),
+        iconDataUrl: form.imagePreviewDataUrl || "",
+      })
+
+      const createdId = makeAgentCompositeId(seller.id, agent.id)
+      const services = splitCommaValues(form.servicesInput)
+      const trustSignals = splitCommaValues(form.trustSignalsInput)
+      setAgentUiOverrides((current) => ({
+        ...current,
+        [createdId]: {
+          avatarImage: form.imagePreviewDataUrl || "",
+          categoryBadges: [
+            `TOOLS ${services.length || 4}`,
+            form.basePriceUsdc.trim() ? `MIN ${form.basePriceUsdc.trim()} USDC` : "MIN 0.01 USDC",
+          ],
+          tags: trustSignals.length ? trustSignals : ["Pending verification"],
+          profile: {
+            category: form.category.trim() || "General",
+            services: services.length ? services : ["Summarize", "Analyze", "Plan", "Response"],
+            apiBaseUrl: form.apiBaseUrl.trim() || "Not provided",
+            apiDocsUrl: form.apiDocsUrl.trim() || "Not provided",
+            slaTier: form.slaTier,
+            pricingModel: form.pricingModel,
+            basePriceUsdc: form.basePriceUsdc.trim() || "Not provided",
+            trustSignals: trustSignals.length ? trustSignals : ["Not provided"],
+            complianceNotes: form.complianceNotes.trim() || "Not provided",
+            kycStatus: form.kycStatus,
+            supportEmail: form.supportEmail.trim() || "Not provided",
+            payoutPolicy: form.payoutPolicy.trim() || "Not provided",
+          },
+        },
+      }))
+
+      await refreshAgents({ showLoading: false })
+
+      pushPath(`/agents/${encodeURIComponent(createdId)}`)
+      scrollToTop()
+      setRouteState({ agentId: createdId, page: "detail" })
+    } catch (error) {
+      setSubmitError(error.message || "Could not register agent.")
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return (
@@ -1407,7 +1100,12 @@ export default function App() {
       <main className="flex min-h-screen flex-col">
         <header className="border-b border-zinc-900/90 bg-[#101010]/95 backdrop-blur">
           <div className="mx-auto flex max-w-[1060px] items-center justify-between px-4 py-5 lg:px-0">
-            <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={goBackToRegistry}
+              className="flex items-center gap-4 rounded-xl text-left transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-600 focus-visible:ring-offset-2 focus-visible:ring-offset-[#101010]"
+              aria-label="Go to home page"
+            >
               <div className="flex size-11 items-center justify-center rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-950 to-zinc-900 shadow-[0_10px_30px_rgba(0,0,0,0.28)]">
                 <div className="flex items-end gap-1">
                   <span className="h-4 w-1.5 rounded-full bg-zinc-500" />
@@ -1423,23 +1121,52 @@ export default function App() {
                   Agent Marketplace
                 </p>
               </div>
-            </div>
+            </button>
             <div className="hidden h-px flex-1 bg-gradient-to-r from-transparent via-zinc-800/80 to-transparent md:ml-10 md:block" />
           </div>
         </header>
 
         <div className="flex-1 px-4 py-5 lg:px-6">
           {routeState?.page === "register" ? (
-            <RegisterAgentScreen onBack={goBackToRegistry} onSubmit={registerAgent} />
+            <RegisterAgentScreen
+              onBack={goBackToRegistry}
+              onSubmit={registerAgent}
+              isSubmitting={isSubmitting}
+              submitError={submitError}
+            />
           ) : selectedAgent && routeState?.page === "edit" ? (
             <AgentEditScreen agent={selectedAgent} onBack={goBackToRegistry} />
           ) : selectedAgent ? (
             <AgentDetailScreen agent={selectedAgent} onBack={goBackToRegistry} />
+          ) : routeState?.agentId && !isLoading ? (
+            <section className="mx-auto max-w-[860px] py-8">
+              <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">
+                <CardContent className="space-y-4 p-6">
+                  <p className="text-sm text-zinc-300">
+                    This agent could not be found in the current backend response.
+                  </p>
+                  <Button variant="outline" className="border-zinc-800" onClick={goBackToRegistry}>
+                    Back to Registry
+                  </Button>
+                </CardContent>
+              </Card>
+            </section>
           ) : (
             <AgentListScreen
-              agents={agents}
+              agents={pagedAgents}
+              allCount={filteredAgents.length}
+              query={query}
+              onQueryChange={setQuery}
               onOpen={openAgent}
               onRegister={openRegisterScreen}
+              page={currentPage}
+              pageCount={pageCount}
+              isLoading={isLoading}
+              loadError={loadError}
+              onRetry={() => refreshAgents()}
+              onPrevPage={() => setPage((current) => Math.max(current - 1, 1))}
+              onNextPage={() => setPage((current) => Math.min(current + 1, pageCount))}
+              onSelectPage={setPage}
             />
           )}
         </div>

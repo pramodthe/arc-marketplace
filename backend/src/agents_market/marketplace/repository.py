@@ -135,12 +135,14 @@ def create_agent(
     name: str,
     description: str,
     metadata_uri: str,
+    icon_data_url: str,
 ) -> Agent:
     agent = Agent(
         seller_id=seller_id,
         name=name,
         description=description,
         metadata_uri=metadata_uri,
+        icon_data_url=icon_data_url,
         status="created",
     )
     db.add(agent)
@@ -182,7 +184,12 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "description": tool.description,
                 "priceUSDC": tool.price_usdc,
                 "seller": {"id": seller.id, "name": seller.name, "walletAddress": seller.owner_wallet_address},
-                "agent": {"id": agent.id, "name": agent.name, "arcAgentId": agent.arc_agent_id},
+                "agent": {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "arcAgentId": agent.arc_agent_id,
+                    "iconDataUrl": agent.icon_data_url,
+                },
             }
         )
     return result
