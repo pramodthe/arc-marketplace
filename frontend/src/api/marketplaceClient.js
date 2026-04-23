@@ -57,3 +57,10 @@ export async function createAgent(sellerId, payload) {
   })
   return data?.agent
 }
+
+export async function updateAgentPricing(sellerId, agentId, payload) {
+  return request(`/sellers/${sellerId}/agents/${agentId}/pricing`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  })
+}

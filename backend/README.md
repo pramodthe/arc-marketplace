@@ -166,6 +166,7 @@ curl -sX POST http://localhost:4021/buyers/<BUYER_ID>/arc/register \
 - `GET /sellers`
 - `GET /sellers/{seller_id}`
 - `POST /sellers/{seller_id}/agents`
+- `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
 - `POST /buyers`
 - `GET /buyers`
 - `GET /buyers/{buyer_id}`
@@ -201,9 +202,8 @@ Wallet/treasury:
 - `uv run arc-buyer` - buyer one-shot/loop flow against marketplace tools
 - `uv run arc-client` - smoke-test paid invoke flow
 - `uv run arc-deposit` - deposit USDC into Gateway
-- `uv run arc-register-agent` - register one Arc agent via reusable service
 - `uv run arc-keygen` - generate demo keypairs
-- `uv run arc-demo-marketplace` - seed or verify 10 sellers and agents
+- `uv run arc-demo-marketplace` - seed or verify 10 sellers and agents (`DEMO_AGENT_METADATA_URI` optional)
 
 ## Alembic migrations
 

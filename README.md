@@ -113,8 +113,7 @@ Use `backend/.env.example` as the source of truth. Key variables:
   - `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`.
 - **Circle + Arc integration**
   - `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`.
-  - `ARC_AGENT_METADATA_URI`, `ARC_OWNER_WALLET_ID`, `ARC_VALIDATOR_WALLET_ID`.
-  - `ARC_RPC_URL` (default Arc testnet RPC).
+  - `ARC_RPC_URL` (default Arc testnet RPC; mostly needed for Arc lifecycle/read endpoints).
 
 ---
 
@@ -145,7 +144,6 @@ uv run arc-demo-marketplace
 uv run arc-client
 uv run arc-buyer
 uv run arc-deposit
-uv run arc-register-agent
 uv run arc-keygen
 ```
 
@@ -261,6 +259,7 @@ curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
 - `GET /sellers`
 - `GET /sellers/{seller_id}`
 - `POST /sellers/{seller_id}/agents`
+- `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
 - `GET /marketplace/tools`
 - `POST /marketplace/discover`
 - `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (payment-gated)

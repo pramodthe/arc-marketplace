@@ -51,6 +51,7 @@ from agents_market.marketplace.repository import (
     list_tools_for_marketplace,
     payment_summary,
     set_validation_response,
+    update_agent_tool_prices,
     upsert_gateway_account,
 )
 
@@ -79,6 +80,7 @@ class AgentCreateBody(BaseModel):
     description: str = ""
     metadataUri: str = ""
     iconDataUrl: str = ""
+    basePriceUSDC: float | None = Field(default=None, gt=0)
 
 
 class BuyerCreateBody(BaseModel):
@@ -136,6 +138,10 @@ class BridgeTransferBody(BaseModel):
     destinationChain: str
     amountUSDC: float = Field(gt=0)
     speed: str = "standard"
+
+
+class AgentPricingUpdateBody(BaseModel):
+    basePriceUSDC: float = Field(gt=0)
 
 
 def _utc_iso() -> str:
@@ -663,8 +669,40 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         description=body.description,
         metadata_uri=body.metadataUri,
         icon_data_url=body.iconDataUrl,
+        base_price_usdc=body.basePriceUSDC,
     )
     return {"agent": _agent_api_payload(agent)}
+
+
+@app.patch("/sellers/{seller_id}/agents/{agent_id}/pricing")
+async def update_agent_pricing_endpoint(
+    seller_id: int,
+    agent_id: int,
+    body: AgentPricingUpdateBody,
+    db: Session = Depends(get_db),
+):
+    seller = get_seller(db, seller_id)
+    if seller is None:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    agent = get_agent(db, agent_id)
+    if agent is None or agent.seller_id != seller_id:
+        raise HTTPException(status_code=404, detail="Agent not found for seller")
+
+    updated_count = update_agent_tool_prices(
+        db,
+        seller_id=seller_id,
+        agent_id=agent_id,
+        base_price_usdc=body.basePriceUSDC,
+    )
+    if updated_count == 0:
+        raise HTTPException(status_code=404, detail="No tools found for agent")
+
+    return {
+        "sellerId": seller_id,
+        "agentId": agent_id,
+        "basePriceUSDC": body.basePriceUSDC,
+        "updatedTools": updated_count,
+    }
 
 
 @app.get("/marketplace/tools")

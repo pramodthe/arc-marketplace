@@ -30,6 +30,7 @@ import {
   getSeller,
   listMarketplaceTools,
   listSellers,
+  updateAgentPricing,
 } from "@/api/marketplaceClient.js"
 import { makeAgentCompositeId, mapMarketplaceToAgentCards } from "@/lib/agentMappers.js"
 
@@ -699,7 +700,17 @@ function DetailRow({ icon: Icon, label, value }) {
   )
 }
 
-function AgentEditScreen({ agent, onBack }) {
+function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitError }) {
+  const initialBasePrice = agent.profile?.basePriceUsdc
+  const [basePriceUsdc, setBasePriceUsdc] = useState(
+    initialBasePrice && initialBasePrice !== "Not provided" ? initialBasePrice : "",
+  )
+
+  function handleSubmit(event) {
+    event.preventDefault()
+    onSavePricing(basePriceUsdc)
+  }
+
   return (
     <section className="mx-auto max-w-[860px] py-8">
       <button
@@ -712,14 +723,13 @@ function AgentEditScreen({ agent, onBack }) {
 
       <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">
         <CardHeader className="space-y-2 p-6">
-          <h1 className="text-xl font-semibold">Edit is not available yet</h1>
+          <h1 className="text-xl font-semibold">Update Agent Pricing</h1>
           <p className="text-sm text-zinc-400">
-            The backend currently exposes create/list endpoints, but no update endpoint for sellers or
-            agents. This screen is kept as a guard so API-backed edit can be enabled once PATCH support
-            is added.
+            Set a new base price for this agent. The backend updates tool prices and the dashboard card
+            reflects the new minimum price after save.
           </p>
         </CardHeader>
-        <CardContent className="space-y-3 p-6 pt-0 text-sm text-zinc-300">
+        <CardContent className="space-y-4 p-6 pt-0 text-sm text-zinc-300">
           <p>
             <span className="text-zinc-500">Agent:</span> {agent.name}
           </p>
@@ -729,13 +739,54 @@ function AgentEditScreen({ agent, onBack }) {
           <p>
             <span className="text-zinc-500">Seller:</span> {agent.owner}
           </p>
+          <form className="space-y-4 rounded-xl border border-zinc-800 bg-[#111111] p-4" onSubmit={handleSubmit}>
+            <label className="block">
+              <span className="mb-2 block text-zinc-100">Base Price (USDC)</span>
+              <Input
+                value={basePriceUsdc}
+                onChange={(event) => setBasePriceUsdc(event.target.value)}
+                placeholder="0.01"
+                className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+              />
+            </label>
+            {submitError ? (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-2 text-xs text-red-200">
+                {submitError}
+              </div>
+            ) : null}
+            <div className="flex items-center gap-2">
+              <Button
+                type="submit"
+                className="h-9 rounded-lg bg-zinc-50 px-4 text-zinc-950 hover:bg-zinc-200"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  "Save Pricing"
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-9 rounded-lg border-zinc-700 bg-zinc-950 px-4 text-zinc-100 hover:bg-zinc-900"
+                onClick={onBack}
+                disabled={isSubmitting}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
         </CardContent>
       </Card>
     </section>
   )
 }
 
-function AgentDetailScreen({ agent, onBack }) {
+function AgentDetailScreen({ agent, onBack, onEditPricing }) {
   return (
     <section className="mx-auto max-w-[1060px] px-0 py-8">
       <button
@@ -917,9 +968,10 @@ function AgentDetailScreen({ agent, onBack }) {
                 <Button
                   variant="outline"
                   className="h-8 w-full justify-center gap-1.5 rounded-md border-zinc-800 bg-zinc-950 text-xs text-zinc-100 hover:bg-zinc-900"
+                  onClick={() => onEditPricing(agent)}
                 >
                   <ArrowUpRight data-icon="inline-start" />
-                  {agent.marketLabel}
+                  Update Pricing
                 </Button>
               </div>
             </CardContent>
@@ -940,6 +992,8 @@ export default function App() {
   const [page, setPage] = useState(1)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState("")
+  const [isPricingSubmitting, setIsPricingSubmitting] = useState(false)
+  const [pricingSubmitError, setPricingSubmitError] = useState("")
   const mergedAgents = useMemo(
     () => agents.map((agent) => mergeAgentProfile(agent, agentUiOverrides[agent.id])),
     [agentUiOverrides, agents],
@@ -1052,6 +1106,7 @@ export default function App() {
         description: agentDescription,
         metadataUri: form.metadataUri.trim(),
         iconDataUrl: form.imagePreviewDataUrl || "",
+        basePriceUSDC: Number(form.basePriceUsdc) > 0 ? Number(form.basePriceUsdc) : undefined,
       })
 
       const createdId = makeAgentCompositeId(seller.id, agent.id)
@@ -1061,10 +1116,6 @@ export default function App() {
         ...current,
         [createdId]: {
           avatarImage: form.imagePreviewDataUrl || "",
-          categoryBadges: [
-            `TOOLS ${services.length || 4}`,
-            form.basePriceUsdc.trim() ? `MIN ${form.basePriceUsdc.trim()} USDC` : "MIN 0.01 USDC",
-          ],
           tags: trustSignals.length ? trustSignals : ["Pending verification"],
           profile: {
             category: form.category.trim() || "General",
@@ -1073,7 +1124,6 @@ export default function App() {
             apiDocsUrl: form.apiDocsUrl.trim() || "Not provided",
             slaTier: form.slaTier,
             pricingModel: form.pricingModel,
-            basePriceUsdc: form.basePriceUsdc.trim() || "Not provided",
             trustSignals: trustSignals.length ? trustSignals : ["Not provided"],
             complianceNotes: form.complianceNotes.trim() || "Not provided",
             kycStatus: form.kycStatus,
@@ -1092,6 +1142,41 @@ export default function App() {
       setSubmitError(error.message || "Could not register agent.")
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  async function saveAgentPricing(basePriceValue) {
+    if (!selectedAgent) return
+    const parsed = Number(basePriceValue)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setPricingSubmitError("Base price must be a positive number.")
+      return
+    }
+
+    setPricingSubmitError("")
+    setIsPricingSubmitting(true)
+    try {
+      await updateAgentPricing(selectedAgent.sellerId, selectedAgent.agentId, { basePriceUSDC: parsed })
+      setAgentUiOverrides((current) => {
+        const existing = current[selectedAgent.id]
+        if (!existing?.profile) return current
+        return {
+          ...current,
+          [selectedAgent.id]: {
+            ...existing,
+            profile: {
+              ...existing.profile,
+              basePriceUsdc: parsed.toFixed(2),
+            },
+          },
+        }
+      })
+      await refreshAgents({ showLoading: false })
+      openAgent(selectedAgent, "detail")
+    } catch (error) {
+      setPricingSubmitError(error.message || "Could not update pricing.")
+    } finally {
+      setIsPricingSubmitting(false)
     }
   }
 
@@ -1135,9 +1220,19 @@ export default function App() {
               submitError={submitError}
             />
           ) : selectedAgent && routeState?.page === "edit" ? (
-            <AgentEditScreen agent={selectedAgent} onBack={goBackToRegistry} />
+            <AgentEditScreen
+              agent={selectedAgent}
+              onBack={() => openAgent(selectedAgent, "detail")}
+              onSavePricing={saveAgentPricing}
+              isSubmitting={isPricingSubmitting}
+              submitError={pricingSubmitError}
+            />
           ) : selectedAgent ? (
-            <AgentDetailScreen agent={selectedAgent} onBack={goBackToRegistry} />
+            <AgentDetailScreen
+              agent={selectedAgent}
+              onBack={goBackToRegistry}
+              onEditPricing={(agent) => openAgent(agent, "edit")}
+            />
           ) : routeState?.agentId && !isLoading ? (
             <section className="mx-auto max-w-[860px] py-8">
               <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">

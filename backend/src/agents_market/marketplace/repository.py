@@ -136,6 +136,7 @@ def create_agent(
     description: str,
     metadata_uri: str,
     icon_data_url: str,
+    base_price_usdc: float | None = None,
 ) -> Agent:
     agent = Agent(
         seller_id=seller_id,
@@ -148,7 +149,16 @@ def create_agent(
     db.add(agent)
     db.flush()
 
+    normalized_base_price = None
+    if base_price_usdc is not None:
+        normalized_base_price = max(float(base_price_usdc), 0.000001)
+
     for default_tool in DEFAULT_TOOLS:
+        tool_price = (
+            normalized_base_price
+            if normalized_base_price is not None
+            else float(default_tool["price_usdc"])
+        )
         db.add(
             Tool(
                 agent_id=agent.id,
@@ -156,7 +166,7 @@ def create_agent(
                 name=default_tool["name"],
                 slug=default_tool["slug"],
                 description=default_tool["description"],
-                price_usdc=default_tool["price_usdc"],
+                price_usdc=tool_price,
             )
         )
     db.commit()
@@ -211,6 +221,28 @@ def get_tool_for_agent(db: Session, *, seller_id: int, agent_id: int, tool_id: i
         )
     )
     return db.scalar(stmt)
+
+
+def update_agent_tool_prices(
+    db: Session,
+    *,
+    seller_id: int,
+    agent_id: int,
+    base_price_usdc: float,
+) -> int:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id, Agent.seller_id == seller_id))
+    if agent is None:
+        return 0
+
+    tools = list(db.scalars(select(Tool).where(Tool.agent_id == agent_id)))
+    if not tools:
+        return 0
+
+    normalized = max(float(base_price_usdc), 0.000001)
+    for tool in tools:
+        tool.price_usdc = normalized
+    db.commit()
+    return len(tools)
 
 
 def create_payment_event(

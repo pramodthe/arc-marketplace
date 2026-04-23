@@ -27,7 +27,6 @@ dependencies = [
 arc-seller = "agents_market.arc.seller.entry:main"
 arc-buyer = "agents_market.arc.buyer.entry:main"
 arc-deposit = "agents_market.arc.cli.deposit:main"
-arc-register-agent = "agents_market.arc.cli.register_agent:main"
 arc-client = "agents_market.arc.cli.client:main"
 arc-keygen = "agents_market.arc.cli.keygen:main"
 arc-demo-marketplace = "agents_market.arc.cli.demo_marketplace:main"

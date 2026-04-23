@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from urllib import request
 
 from agents_market._env import load_backend_env
 
 BASE_URL = "http://localhost:4021"
+DEFAULT_DEMO_METADATA_URI = "https://your-agent-domain/.well-known/agent-card.json"
 
 
 @dataclass
@@ -18,6 +20,7 @@ class SellerSeed:
     owner_wallet: str
     validator_wallet: str
     agent_name: str
+    metadata_uri: str
 
 
 def http_get(path: str) -> dict:
@@ -58,7 +61,7 @@ def ensure_seller_and_agent(seed: SellerSeed) -> tuple[int, int]:
             {
                 "name": seed.agent_name,
                 "description": "Hackathon marketplace demo agent",
-                "metadataUri": "ipfs://bafkreibdi6623n3xpf7ymk62ckb4bo75o3qemwkpfvp5i25j66itxvsoei",
+                "metadataUri": seed.metadata_uri,
             },
         )["agent"]
     return seller_id, match["id"]
@@ -66,6 +69,7 @@ def ensure_seller_and_agent(seed: SellerSeed) -> tuple[int, int]:
 
 def main() -> None:
     load_backend_env()
+    metadata_uri = os.getenv("DEMO_AGENT_METADATA_URI", DEFAULT_DEMO_METADATA_URI).strip()
     seeds = [
         SellerSeed(
             name=f"Seller-{idx:02d}",
@@ -73,6 +77,7 @@ def main() -> None:
             owner_wallet="0x9789AD5776fD505C026148bB989A69A0DcaC9D28",
             validator_wallet="0xaBB7D9CD054b1E78074c25f8E65c291015871847",
             agent_name=f"Agent-{idx:02d}",
+            metadata_uri=metadata_uri,
         )
         for idx in range(1, 11)
     ]
