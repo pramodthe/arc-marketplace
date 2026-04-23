@@ -1,0 +1,179 @@
+# Backend (`agents-market`)
+
+Multi-seller Arc marketplace backend for hackathon demos:
+
+- FastAPI service under `src/agents_market/arc/seller/app.py`
+- Seller/agent/tool persistence with SQLAlchemy + Alembic
+- x402 nanopayment execution using Circle Gateway (`circlekit`)
+- Arc ERC-8004 identity/reputation/validation service endpoints
+- Gateway and Bridge Kit workflow endpoints (bridge orchestration stub + records)
+
+## Project layout
+
+- `src/agents_market/arc/seller/` - marketplace API
+- `src/agents_market/arc/buyer/` - buyer runner that pays marketplace tools
+- `src/agents_market/arc/cli/` - CLI utilities (deposit/register/client/keygen)
+- `src/agents_market/arc/services/` - reusable Arc ERC-8004 integrations
+- `src/agents_market/marketplace/` - DB models and repository helpers
+- `alembic/` - migration config and initial schema migration
+- `src/agents_market/arc/cli/demo_marketplace.py` - seed 10 sellers + agents for demo
+
+## Setup
+
+From `backend/`:
+
+```bash
+uv sync
+cp .env.example .env
+```
+
+Default DB:
+
+- `DATABASE_URL=sqlite:///./agents_market.db`
+
+`circle-titanoboa-sdk` (provides `circlekit` and x402) is wired from `../../circle-titanoboa-sdk`. Update `[tool.uv.sources]` in `pyproject.toml` if your local path differs.
+
+## Run
+
+```bash
+uv run arc-seller
+```
+
+Base URL defaults to `http://localhost:4021`.
+
+## Seller onboarding flow (create and sell an agent service)
+
+This is the fastest flow for a new seller to list an agent and start selling paid calls.
+
+1) Create a seller profile:
+
+```bash
+curl -sX POST http://localhost:4021/sellers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "AlphaAgent Labs",
+    "description": "Autonomous trading and risk tools",
+    "ownerWalletAddress": "0x9789AD5776fD505C026148bB989A69A0DcaC9D28",
+    "validatorWalletAddress": "0xaBB7D9CD054b1E78074c25f8E65c291015871847"
+  }'
+```
+
+2) Create an agent under that seller:
+
+```bash
+curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Arb Scout v1",
+    "description": "Cross-chain opportunity analysis and execution plans",
+    "metadataUri": "ipfs://bafkreibdi6623n3xpf7ymk62ckb4bo75o3qemwkpfvp5i25j66itxvsoei"
+  }'
+```
+
+3) Register the agent on Arc ERC-8004:
+
+```bash
+curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+4) Verify listing visibility:
+
+```bash
+curl -s http://localhost:4021/marketplace/tools
+```
+
+5) Buyers discover and pay to invoke:
+
+- Discovery: `POST /marketplace/discover`
+- Paid invoke: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
+- Ledger: `GET /transactions`
+
+Notes:
+- Default tools are seeded per agent (`summarize`, `analyze`, `plan`, `response`).
+- If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`.
+- For external interoperability, publish or consume discovery docs via `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
+
+## Buyer onboarding flow (register consumer agent)
+
+Buyers are consumer agents (no public API required). Register them so invocations and Arc identity are tracked.
+
+1) Create buyer profile:
+
+```bash
+curl -sX POST http://localhost:4021/buyers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "HospitalOpsAgent",
+    "organization": "XYZ Health",
+    "description": "Routes finance/admin tasks to specialized seller agents",
+    "walletAddress": "0xc66BBb9C0c697c41cd4a05fA1D2E5552c1af7a23"
+  }'
+```
+
+2) (Optional but recommended) Register buyer on Arc ERC-8004:
+
+```bash
+curl -sX POST http://localhost:4021/buyers/<BUYER_ID>/arc/register \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+3) Set `BUYER_ID` in `.env` so `arc-buyer` and `arc-client` attach buyer identity in paid invokes.
+
+## Core API (MVP)
+
+- `POST /sellers`
+- `GET /sellers`
+- `GET /sellers/{seller_id}`
+- `POST /sellers/{seller_id}/agents`
+- `POST /buyers`
+- `GET /buyers`
+- `GET /buyers/{buyer_id}`
+- `POST /buyers/{buyer_id}/arc/register`
+- `GET /marketplace/tools`
+- `POST /marketplace/discover` (autonomous ranked discovery by prompt+budget)
+- `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (x402 paid)
+- `GET /transactions`
+
+External discovery compatibility:
+
+- `GET /.well-known/agent-card.json`
+- `GET /.well-known/ai-plugin.json`
+- `GET /openapi.yaml`
+
+Arc lifecycle:
+
+- `POST /agents/{agent_id}/arc/register`
+- `POST /agents/{agent_id}/arc/reputation`
+- `POST /agents/{agent_id}/arc/validation/request`
+- `POST /agents/{agent_id}/arc/validation/respond`
+
+Wallet/treasury:
+
+- `POST /sellers/{seller_id}/wallets/provision` (Circle developer-controlled wallets)
+- `POST /sellers/{seller_id}/gateway/deposit`
+- `GET /sellers/{seller_id}/gateway/balances`
+- `POST /sellers/{seller_id}/bridge/transfers`
+
+## CLI commands
+
+- `uv run arc-seller` - start marketplace API
+- `uv run arc-buyer` - buyer one-shot/loop flow against marketplace tools
+- `uv run arc-client` - smoke-test paid invoke flow
+- `uv run arc-deposit` - deposit USDC into Gateway
+- `uv run arc-register-agent` - register one Arc agent via reusable service
+- `uv run arc-keygen` - generate demo keypairs
+- `uv run arc-demo-marketplace` - seed or verify 10 sellers and agents
+
+## Alembic migrations
+
+Initial migration exists at `alembic/versions/0001_marketplace_schema.py`.
+
+Example commands:
+
+```bash
+uv run alembic upgrade head
+uv run alembic revision --autogenerate -m "message"
+```

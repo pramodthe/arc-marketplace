@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-market"
+version = "0.1.0"
+description = "Backend: Arc x402 seller and buyer demo."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "eth-account>=0.13",
+    "web3>=7.0",
+    "circle-developer-controlled-wallets>=6.0",
+    # circlekit + x402 Gateway client/middleware (install from sibling path by default)
+    "circle-titanoboa-sdk[x402]",
+]
+
+[project.scripts]
+arc-seller = "agents_market.arc.seller.entry:main"
+arc-buyer = "agents_market.arc.buyer.entry:main"
+arc-deposit = "agents_market.arc.cli.deposit:main"
+arc-register-agent = "agents_market.arc.cli.register_agent:main"
+arc-client = "agents_market.arc.cli.client:main"
+arc-keygen = "agents_market.arc.cli.keygen:main"
+arc-demo-marketplace = "agents_market.arc.cli.demo_marketplace:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agents_market"]
+
+[tool.uv.sources]
+circle-titanoboa-sdk = { path = "../../circle-titanoboa-sdk", editable = true }
