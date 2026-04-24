@@ -86,9 +86,15 @@ After a buyer run, open Arcscan pages for buyer wallet, seller wallet, and lates
 Optional overrides:
 
 ```bash
-BACKEND_BASE_URL=http://localhost:4021 \
+BACKEND_BASE_URL=http://localhost:4022 \
 EXPLORER_BASE_URL=https://testnet.arcscan.app \
 BUYER_WALLET_ADDRESS=0x... \
 SELLER_WALLET_ADDRESS=0x... \
 ./open_transactions.sh
 ```
+
+Notes:
+
+- `http://localhost:4022/transactions` is the JSON/API endpoint.
+- `http://localhost:4022/transactions/view` is the browser-friendly ledger view.
+- In x402 mode, `transactionRef` is often a Circle Gateway reference, not an Arc on-chain tx hash. Arcscan can only open values that look like `0x...` transaction hashes.

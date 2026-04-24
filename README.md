@@ -6,8 +6,8 @@ Agents Market is a multi-seller agent marketplace demo focused on the Arc hackat
 - track usage and payment events for demo evidence.
 
 The repository has:
-- a Python backend for marketplace APIs, payment enforcement, Arc lifecycle flows, and CLI runners.
-- a React frontend that currently provides a polished marketplace UI shell (mostly static/mock data).
+- a Python backend for marketplace APIs, provider endpoint proxying, payment enforcement, Arc lifecycle flows, and CLI runners.
+- a React frontend wired to the backend marketplace agent contract.
 
 ---
 
@@ -18,12 +18,12 @@ The repository has:
 - **Paid invocation flow**: buyer pays via x402/Gateway before calling seller tool endpoints.
 - **Ledgering**: payment and output events are persisted for transaction/frequency reporting.
 - **Arc lifecycle endpoints**: ERC-8004 style register/reputation/validation request/response flows.
-- **Wallet/gateway operations**: provision Circle developer-controlled wallets and deposit/check Gateway balances.
+- **Wallet/gateway operations**: provision Circle developer-controlled wallets and operate a shared demo Gateway treasury for balance/deposit checks.
 - **CLI utilities**: buyer/seller client runs, deposit, keygen, registration, demo data seeding.
 
 ### Current limitations (important)
 - **Bridge transfer endpoint is an orchestration stub** (records queued transfer metadata; does not execute a full bridge route yet).
-- **Frontend is not fully wired to backend APIs**; most screen content is static demo data.
+- **Provider listings require Circle/Arc environment variables** because active listings are automatically registered on Arc ERC-8004.
 
 ---
 
@@ -61,7 +61,7 @@ agents_market/
 ### Runtime + API
 - **`fastapi`**: high-velocity API framework for marketplace + payment-gated routes.
 - **`uvicorn[standard]`**: ASGI server used to run the FastAPI seller service.
-- **`httpx`**: outbound HTTP calls (LLM/provider integrations and client requests).
+- **`httpx`**: outbound HTTP calls for provider API proxying and client requests.
 - **`python-dotenv`**: `.env` loading for local developer setup and secrets wiring.
 - **`pyyaml`**: YAML/OpenAPI related serialization support used by compatibility endpoints.
 
@@ -103,14 +103,12 @@ Use `backend/.env.example` as the source of truth. Key variables:
 
 - **Payment + runtime**
   - `PRIVATE_KEY`: buyer wallet private key.
-  - `SELLER_PRIVATE_KEY`: seller-side wallet key for Gateway ops.
+  - `SELLER_PRIVATE_KEY`: shared hackathon Gateway treasury key for demo deposit/balance operations.
   - `SERVER_URL`, `PORT`, `PUBLIC_BASE_URL`.
 - **Database**
   - `DATABASE_URL` (default SQLite).
 - **Buyer behavior**
   - `BUYER_PROMPT`, `BUYER_TASK`, `BUYER_BUDGET_USDC`, `BUYER_LOOP_SECONDS`.
-- **LLM integration (optional)**
-  - `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`.
 - **Circle + Arc integration**
   - `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`.
   - `ARC_RPC_URL` (default Arc testnet RPC; mostly needed for Arc lifecycle/read endpoints).
@@ -220,7 +218,7 @@ curl -sX POST http://localhost:4021/sellers \
 
 ### Step 3: Create your agent record
 
-Set `metadataUri` to your published card (or metadata document that points to it).
+Register the developer-owned provider endpoint. This automatically provisions/reuses Circle wallets and registers the agent on Arc ERC-8004 before the listing becomes active.
 
 ```bash
 curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
@@ -228,21 +226,19 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
   -d '{
     "name": "Arb Scout v1",
     "description": "Cross-chain opportunity analysis and execution plans",
+    "category": "Analytics",
+    "endpointUrl": "https://your-agent-domain/api/invoke",
+    "httpMethod": "POST",
+    "priceUSDC": 0.01,
+    "apiDocsUrl": "https://your-agent-domain/docs",
     "metadataUri": "https://your-agent-domain/.well-known/agent-card.json"
   }'
 ```
 
-### Step 4: Register on Arc (optional but recommended)
+### Step 4: Verify your listing and paid invoke path
 
-```bash
-curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
-
-### Step 5: Verify your listing and paid invoke path
-
-- Check marketplace visibility: `GET /marketplace/tools`
+- Check marketplace visibility: `GET /marketplace/agents`
+- Check tool compatibility: `GET /marketplace/tools`
 - Invoke route pattern: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
 - Check ledger events: `GET /transactions`
 
@@ -260,6 +256,7 @@ curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
 - `GET /sellers/{seller_id}`
 - `POST /sellers/{seller_id}/agents`
 - `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
+- `GET /marketplace/agents`
 - `GET /marketplace/tools`
 - `POST /marketplace/discover`
 - `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (payment-gated)
@@ -275,6 +272,7 @@ curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
 - `POST /sellers/{seller_id}/wallets/provision`
 - `POST /sellers/{seller_id}/gateway/deposit`
 - `GET /sellers/{seller_id}/gateway/balances`
+- `GET /gateway/demo-treasury/balances`
 - `POST /sellers/{seller_id}/bridge/transfers` (currently recorded as queued orchestration stub)
 
 ### Compatibility/discovery metadata
@@ -297,13 +295,23 @@ This design is what enables per-action monetization and high-frequency transacti
 
 ---
 
+## Hackathon Payment Model
+
+- One Circle developer account (`CIRCLE_API_KEY` + `CIRCLE_ENTITY_SECRET`) provisions all demo seller, buyer, owner, and validator wallets.
+- Arc identity registration remains seller/agent-specific: each Arc-registered agent receives owner and validator wallets on `ARC-TESTNET`.
+- x402 paid invokes use the seller's `ownerWalletAddress` as the payment recipient in the Gateway payment challenge.
+- Gateway deposit and balance routes use `SELLER_PRIVATE_KEY` as a shared local demo treasury key. The seller-scoped Gateway endpoints are compatibility views that include seller context plus `mode: "shared_demo_treasury"`.
+- This is acceptable for hackathon evidence and local demos. Production custody should replace the shared private key with seller-specific treasury/accounting controls.
+
+---
+
 ## Hackathon Alignment Snapshot
 
 - Arc + USDC + Circle nanopayment infrastructure: implemented.
 - Per-action low-cost priced tools: implemented.
 - Transaction event persistence for frequency reporting: implemented.
 - Bridge/liquidity advanced workflow execution: partially implemented (bridge endpoint currently stubbed).
-- End-to-end polished frontend integration: partial.
+- End-to-end polished frontend integration: implemented for marketplace browsing, listing creation, and pricing updates.
 
 ---
 

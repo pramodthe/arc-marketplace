@@ -1,4 +1,4 @@
-"""Load `.env` from the backend project root (parent of `src/`)."""
+"""Load env from backend/.env and supplement with the workspace root .env when present."""
 
 from pathlib import Path
 
@@ -6,11 +6,17 @@ from dotenv import load_dotenv
 
 
 def load_backend_env() -> None:
-    """Load env from `backend/.env`, fallback to default dotenv behavior."""
+    """Load backend env first, then fill any missing values from the repo root `.env`."""
     backend_root = Path(__file__).resolve().parents[2]
-    main_env = backend_root / ".env"
-    if main_env.is_file():
-        load_dotenv(main_env)
-        return
-    if not main_env.is_file():
+    backend_env = backend_root / ".env"
+    workspace_env = backend_root.parent / ".env"
+
+    loaded_any = False
+    if backend_env.is_file():
+        load_dotenv(backend_env, override=False)
+        loaded_any = True
+    if workspace_env.is_file():
+        load_dotenv(workspace_env, override=False)
+        loaded_any = True
+    if not loaded_any:
         load_dotenv()

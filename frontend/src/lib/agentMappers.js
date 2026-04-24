@@ -42,116 +42,92 @@ function normalizeStatus(status) {
   return "Active"
 }
 
+function formatPrice(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return "0.00"
+  return number.toFixed(number < 0.01 && number > 0 ? 6 : 2)
+}
+
 export function makeAgentCompositeId(sellerId, agentId) {
   return `${sellerId}:${agentId}`
 }
 
-function createMappedAgent({ seller, agent, tools, index }) {
-  const compositeId = makeAgentCompositeId(seller.id, agent.id)
-  const tags = Array.from(new Set(tools.map((tool) => toTitleCase(tool.toolKey))))
-  const minPrice = Math.min(...tools.map((tool) => Number(tool.priceUSDC)))
+export function mapMarketplaceAgentsToCards(marketplaceAgents) {
+  return marketplaceAgents.map((entry, index) => {
+    const seller = entry.seller || {}
+    const commerce = entry.commerce || {}
+    const arc = entry.arc || {}
+    const tools = entry.tools || []
+    const minPrice = Number(commerce.minPriceUSDC || 0)
+    const category = entry.category || "General"
+    const endpointHost = entry.endpointHost || "Endpoint unavailable"
+    const skillCount = tools.reduce((count, tool) => count + (tool.skills?.length || 0), 0)
+    const tags = Array.from(
+      new Set([category, ...tools.map((tool) => toTitleCase(tool.toolKey || tool.name || ""))].filter(Boolean)),
+    )
 
-  const metadata = {
-    compositeId,
-    seller,
-    agent,
-    tools,
-  }
-  const fallbackServices = tools.map((tool) => tool.name).filter(Boolean)
-
-  return {
-    id: compositeId,
-    sellerId: seller.id,
-    agentId: agent.id,
-    name: agent.name || "Unnamed Agent",
-    avatarImage: agent.iconDataUrl || "",
-    shortAddress: formatShortAddress(String(agent.id)),
-    wallet: seller.walletAddress || "Wallet unavailable",
-    owner: seller.name || "Unknown seller",
-    authority: seller.validatorWalletAddress || "Not configured",
-    assetType: "Core Asset",
-    status: normalizeStatus(agent.status),
-    description: agent.description || tools[0]?.description || "No description provided.",
-    tags: tags.length ? tags : ["General"],
-    categoryBadges: [
-      `TOOLS ${tools.length}`,
-      minPrice > 0 ? `MIN ${minPrice.toFixed(2)} USDC` : "FREE",
-    ],
-    avatar: initialsFromName(agent.name || ""),
-    color: CARD_GRADIENTS[index % CARD_GRADIENTS.length],
-    holdings: [{ amount: String(tools.length), symbol: "TOOLS" }],
-    token: "Not provided by API",
-    paymentProtocol: tools.length ? "x402 Enabled" : "x402 Not Enabled",
-    registries: ["Arc Marketplace", "Seller API"],
-    explorerLabel: "View API Details",
-    marketLabel: "Invoke Tool",
-    rawMetadata: JSON.stringify(metadata, null, 2),
-    editable: false,
-    profile: {
-      category: "General",
-      services: fallbackServices.length ? fallbackServices : ["Not provided by backend"],
-      apiBaseUrl: "Not provided by backend",
-      apiDocsUrl: "Not provided by backend",
-      slaTier: "Not provided by backend",
-      pricingModel: "Per invocation",
-      basePriceUsdc: minPrice > 0 ? minPrice.toFixed(2) : "Not provided by backend",
-      trustSignals: tags.length ? tags : ["Not provided by backend"],
-      complianceNotes: "Not provided by backend",
-      kycStatus: "Unknown",
-      supportEmail: "Not provided by backend",
-      payoutPolicy: "Not provided by backend",
-    },
-    searchableText: [
-      agent.name,
-      agent.description,
-      seller.name,
-      seller.walletAddress,
-      tags.join(" "),
-      tools.map((tool) => tool.name).join(" "),
-    ]
-      .join(" ")
-      .toLowerCase(),
-  }
-}
-
-export function mapMarketplaceToAgentCards({ tools, sellerDetailsById }) {
-  const grouped = new Map()
-
-  for (const tool of tools) {
-    const seller = tool.seller || {}
-    const agent = tool.agent || {}
-    const key = makeAgentCompositeId(seller.id, agent.id)
-    if (!grouped.has(key)) {
-      grouped.set(key, {
-        sellerId: seller.id,
-        agentId: agent.id,
-        sellerFromTool: seller,
-        tools: [],
-      })
+    return {
+      id: entry.id || makeAgentCompositeId(entry.sellerId, entry.agentId),
+      sellerId: entry.sellerId,
+      agentId: entry.agentId,
+      name: entry.name || "Unnamed Agent",
+      avatarImage: entry.iconDataUrl || "",
+      shortAddress: arc.agentId ? `Arc #${arc.agentId}` : formatShortAddress(String(entry.agentId || "")),
+      wallet: seller.walletAddress || "Wallet pending",
+      owner: seller.name || "Unknown seller",
+      authority: seller.validatorWalletAddress || "Validator pending",
+      assetType: "Provider API",
+      status: normalizeStatus(entry.status),
+      description: entry.description || "No description provided.",
+      tags: tags.length ? tags : ["General"],
+      categoryBadges: [
+        category.toUpperCase(),
+        `${formatPrice(minPrice)} USDC`,
+        arc.registered ? "ARC REGISTERED" : "ARC PENDING",
+      ],
+      avatar: initialsFromName(entry.name || ""),
+      color: CARD_GRADIENTS[index % CARD_GRADIENTS.length],
+      holdings: [{ amount: String(commerce.toolCount || tools.length), symbol: "TOOLS" }],
+      toolCount: commerce.toolCount || tools.length,
+      skillCount,
+      token: arc.agentId || "Pending Arc ID",
+      paymentProtocol: commerce.paymentProtocol === "arc-usdc" ? "Arc USDC Settlement" : "x402 Pending",
+      registries: ["Arc ERC-8004", "A2A Discovery", "Circle Wallets"],
+      explorerLabel: "Copy Invoke URL",
+      marketLabel: "Invoke Tool",
+      rawMetadata: JSON.stringify(entry, null, 2),
+      editable: false,
+      invokePath: tools[0]?.invokePath || "",
+      tools,
+      profile: {
+        category,
+        services: tools.length ? tools.map((tool) => tool.name) : [entry.name || "Provider endpoint"],
+        apiBaseUrl: endpointHost,
+        apiDocsUrl: entry.apiDocsUrl || "",
+        endpointUrl: entry.endpointUrl || "",
+        httpMethod: entry.httpMethod || "POST",
+        healthStatus: entry.healthStatus || "unchecked",
+        pricingModel: commerce.pricingModel || "On-chain metered",
+        basePriceUsdc: formatPrice(minPrice),
+        trustSignals: [
+          arc.registered ? "Arc ERC-8004 registered" : "Arc registration pending",
+          commerce.paymentProtocol === "arc-usdc" ? "Real Arc USDC settlement" : "Payment pending",
+        ],
+        arcAgentId: arc.agentId || "",
+        identityTxHash: arc.identityTxHash || "",
+        network: arc.network || "Arc Testnet",
+      },
+      searchableText: [
+        entry.name,
+        entry.description,
+        category,
+        endpointHost,
+        seller.name,
+        seller.walletAddress,
+        tools.map((tool) => tool.name).join(" "),
+      ]
+        .join(" ")
+        .toLowerCase(),
     }
-    grouped.get(key).tools.push(tool)
-  }
-
-  const mapped = Array.from(grouped.values()).map((group, index) => {
-    const detail = sellerDetailsById[group.sellerId]
-    const seller = detail?.seller || {
-      id: group.sellerId,
-      name: group.sellerFromTool?.name || "Unknown seller",
-      walletAddress: group.sellerFromTool?.walletAddress || "",
-      validatorWalletAddress: "",
-      status: "active",
-    }
-    const detailAgent =
-      detail?.agents?.find((candidate) => candidate.id === group.agentId) ||
-      group.tools[0]?.agent || { id: group.agentId, name: "Unnamed Agent", description: "" }
-
-    return createMappedAgent({
-      seller,
-      agent: detailAgent,
-      tools: group.tools,
-      index,
-    })
   })
-
-  return mapped.sort((left, right) => right.agentId - left.agentId)
 }

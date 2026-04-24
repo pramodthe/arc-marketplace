@@ -28,11 +28,10 @@ import {
   createAgent,
   createSeller,
   getSeller,
-  listMarketplaceTools,
-  listSellers,
-  updateAgentPricing,
+  listMarketplaceAgents,
+  updateToolPricing,
 } from "@/api/marketplaceClient.js"
-import { makeAgentCompositeId, mapMarketplaceToAgentCards } from "@/lib/agentMappers.js"
+import { makeAgentCompositeId, mapMarketplaceAgentsToCards } from "@/lib/agentMappers.js"
 
 const PAGE_SIZE = 9
 
@@ -61,25 +60,6 @@ function readRouteFromPath() {
 
 function normalizeSearch(value) {
   return value.trim().toLowerCase()
-}
-
-function splitCommaValues(value) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
-function mergeAgentProfile(agent, override) {
-  if (!override) return agent
-  return {
-    ...agent,
-    ...override,
-    profile: {
-      ...(agent.profile || {}),
-      ...(override.profile || {}),
-    },
-  }
 }
 
 function MetricCard({ dotClassName, icon: Icon, title, children }) {
@@ -309,7 +289,7 @@ function AgentListScreen({
 }
 
 function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
-  const steps = ["Identity", "Services", "Trust & Ops", "Review"]
+  const steps = ["Identity", "Endpoint", "Review"]
   const [step, setStep] = useState(0)
   const [form, setForm] = useState({
     imageName: "",
@@ -318,22 +298,114 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
     agentDescription: "",
     wallet: "",
     metadataUri: "",
-    category: "General",
-    servicesInput: "",
-    apiBaseUrl: "",
     apiDocsUrl: "",
-    slaTier: "Standard",
-    pricingModel: "Per invocation",
-    basePriceUsdc: "",
-    trustSignalsInput: "",
-    complianceNotes: "",
-    kycStatus: "Unknown",
-    supportEmail: "",
-    payoutPolicy: "",
+    capabilities: [
+      {
+        toolKey: "invoke",
+        name: "",
+        description: "",
+        category: "General",
+        endpointUrl: "",
+        httpMethod: "POST",
+        priceUsdc: "0.01",
+        runtimePriceUsdc: "0.00",
+        skills: [],
+      },
+    ],
   })
 
   function updateField(key, value) {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  function updateCapability(index, key, value) {
+    setForm((current) => ({
+      ...current,
+      capabilities: current.capabilities.map((capability, capabilityIndex) =>
+        capabilityIndex === index ? { ...capability, [key]: value } : capability,
+      ),
+    }))
+  }
+
+  function updateCapabilitySkill(capabilityIndex, skillIndex, key, value) {
+    setForm((current) => ({
+      ...current,
+      capabilities: current.capabilities.map((capability, currentCapabilityIndex) => {
+        if (currentCapabilityIndex !== capabilityIndex) return capability
+        return {
+          ...capability,
+          skills: capability.skills.map((skill, currentSkillIndex) =>
+            currentSkillIndex === skillIndex ? { ...skill, [key]: value } : skill,
+          ),
+        }
+      }),
+    }))
+  }
+
+  function addCapability() {
+    setForm((current) => ({
+      ...current,
+      capabilities: [
+        ...current.capabilities,
+        {
+          toolKey: `tool-${current.capabilities.length + 1}`,
+          name: "",
+          description: "",
+          category: "General",
+          endpointUrl: "",
+          httpMethod: "POST",
+          priceUsdc: "0.01",
+          runtimePriceUsdc: "0.00",
+          skills: [],
+        },
+      ],
+    }))
+  }
+
+  function removeCapability(index) {
+    setForm((current) => ({
+      ...current,
+      capabilities:
+        current.capabilities.length === 1
+          ? current.capabilities
+          : current.capabilities.filter((_, capabilityIndex) => capabilityIndex !== index),
+    }))
+  }
+
+  function addSkill(capabilityIndex) {
+    setForm((current) => ({
+      ...current,
+      capabilities: current.capabilities.map((capability, currentCapabilityIndex) =>
+        currentCapabilityIndex === capabilityIndex
+          ? {
+              ...capability,
+              skills: [
+                ...capability.skills,
+                {
+                  skillKey: `skill-${capability.skills.length + 1}`,
+                  name: "",
+                  description: "",
+                  priceUsdc: "0.00",
+                },
+              ],
+            }
+          : capability,
+      ),
+    }))
+  }
+
+  function removeSkill(capabilityIndex, skillIndex) {
+    setForm((current) => ({
+      ...current,
+      capabilities: current.capabilities.map((capability, currentCapabilityIndex) =>
+        currentCapabilityIndex === capabilityIndex
+          ? {
+              ...capability,
+              skills: capability.skills.filter((_, currentSkillIndex) => currentSkillIndex !== skillIndex),
+            }
+          : capability,
+      ),
+    }))
   }
 
   function nextStep() {
@@ -455,10 +527,10 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
           ) : null}
 
           {step === 1 ? (
-            <div className="grid gap-5 sm:grid-cols-2">
+            <div className="space-y-5">
               <label className="block sm:col-span-2">
                 <span className="mb-3 block text-[16px] text-zinc-100">
-                  Wallet Address (identity + payouts)
+                  Wallet Address (optional)
                 </span>
                 <Input
                   value={form.wallet}
@@ -467,63 +539,8 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
                   className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
                 />
                 <p className="mt-2 text-xs text-zinc-500">
-                  Used to identify seller and receive payments in this demo.
+                  Circle wallets are provisioned automatically if this is empty.
                 </p>
-              </label>
-              <label className="block sm:col-span-2">
-                <span className="mb-3 block text-[16px] text-zinc-100">
-                  Metadata Link (optional, advanced)
-                </span>
-                <Input
-                  value={form.metadataUri}
-                  onChange={(event) => updateField("metadataUri", event.target.value)}
-                  placeholder="ipfs://..."
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-                <p className="mt-2 text-xs text-zinc-500">
-                  Optional URI with extra profile data (for future integrations).
-                </p>
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">Category</span>
-                <Input
-                  value={form.category}
-                  onChange={(event) => updateField("category", event.target.value)}
-                  placeholder="Analytics"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">SLA Tier</span>
-                <select
-                  value={form.slaTier}
-                  onChange={(event) => updateField("slaTier", event.target.value)}
-                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-                >
-                  <option>Standard</option>
-                  <option>Priority</option>
-                  <option>Enterprise</option>
-                </select>
-              </label>
-              <label className="block sm:col-span-2">
-                <span className="mb-3 block text-[16px] text-zinc-100">
-                  Services Offered (comma separated)
-                </span>
-                <Input
-                  value={form.servicesInput}
-                  onChange={(event) => updateField("servicesInput", event.target.value)}
-                  placeholder="Summarize, Analyze, Risk Scoring"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">API Base URL</span>
-                <Input
-                  value={form.apiBaseUrl}
-                  onChange={(event) => updateField("apiBaseUrl", event.target.value)}
-                  placeholder="https://api.example.com"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
               </label>
               <label className="block">
                 <span className="mb-3 block text-[16px] text-zinc-100">API Docs URL</span>
@@ -534,87 +551,207 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
                   className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
                 />
               </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">Pricing Model</span>
-                <select
-                  value={form.pricingModel}
-                  onChange={(event) => updateField("pricingModel", event.target.value)}
-                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-                >
-                  <option>Per invocation</option>
-                  <option>Monthly subscription</option>
-                  <option>Tiered usage</option>
-                  <option>Custom contract</option>
-                </select>
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">Base Price (USDC)</span>
+              <label className="block sm:col-span-2">
+                <span className="mb-3 block text-[16px] text-zinc-100">
+                  Metadata / A2A URL
+                </span>
                 <Input
-                  value={form.basePriceUsdc}
-                  onChange={(event) => updateField("basePriceUsdc", event.target.value)}
-                  placeholder="0.01"
+                  value={form.metadataUri}
+                  onChange={(event) => updateField("metadataUri", event.target.value)}
+                  placeholder="https://your-agent.example/.well-known/agent-card.json"
                   className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
                 />
               </label>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[16px] text-zinc-100">Capabilities</p>
+                    <p className="mt-1 text-xs text-zinc-500">Each capability becomes a priced tool on the marketplace.</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="rounded-lg border-zinc-800 bg-[#111111] text-zinc-100 hover:bg-zinc-900"
+                    onClick={addCapability}
+                  >
+                    Add Capability
+                  </Button>
+                </div>
+                {form.capabilities.map((capability, capabilityIndex) => (
+                  <div
+                    key={`${capability.toolKey}-${capabilityIndex}`}
+                    className="rounded-2xl border border-zinc-800 bg-[#111111] p-4"
+                  >
+                    <div className="mb-4 flex items-center justify-between">
+                      <p className="text-sm font-medium text-zinc-100">Capability {capabilityIndex + 1}</p>
+                      {form.capabilities.length > 1 ? (
+                        <button
+                          type="button"
+                          className="text-xs text-zinc-500 hover:text-zinc-100"
+                          onClick={() => removeCapability(capabilityIndex)}
+                        >
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">Capability Key</span>
+                        <Input
+                          value={capability.toolKey}
+                          onChange={(event) => updateCapability(capabilityIndex, "toolKey", event.target.value)}
+                          placeholder="analyze-risk"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">Name</span>
+                        <Input
+                          value={capability.name}
+                          onChange={(event) => updateCapability(capabilityIndex, "name", event.target.value)}
+                          placeholder="Analyze Risk"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="mb-2 block text-sm text-zinc-100">Endpoint URL</span>
+                        <Input
+                          value={capability.endpointUrl}
+                          onChange={(event) => updateCapability(capabilityIndex, "endpointUrl", event.target.value)}
+                          placeholder="https://api.example.com/agent/analyze"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="mb-2 block text-sm text-zinc-100">Description</span>
+                        <textarea
+                          value={capability.description}
+                          onChange={(event) => updateCapability(capabilityIndex, "description", event.target.value)}
+                          className="min-h-[92px] w-full rounded-xl border border-zinc-800 bg-[#0d0d0d] px-4 py-3 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">Category</span>
+                        <Input
+                          value={capability.category}
+                          onChange={(event) => updateCapability(capabilityIndex, "category", event.target.value)}
+                          placeholder="Analytics"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">HTTP Method</span>
+                        <select
+                          value={capability.httpMethod}
+                          onChange={(event) => updateCapability(capabilityIndex, "httpMethod", event.target.value)}
+                          className="h-11 w-full rounded-xl border border-zinc-800 bg-[#0d0d0d] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
+                        >
+                          <option>POST</option>
+                          <option>GET</option>
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">Tool Price (USDC)</span>
+                        <Input
+                          value={capability.priceUsdc}
+                          onChange={(event) => updateCapability(capabilityIndex, "priceUsdc", event.target.value)}
+                          placeholder="0.01"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-2 block text-sm text-zinc-100">Runtime Price / Request</span>
+                        <Input
+                          value={capability.runtimePriceUsdc}
+                          onChange={(event) =>
+                            updateCapability(capabilityIndex, "runtimePriceUsdc", event.target.value)
+                          }
+                          placeholder="0.00"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                        />
+                      </label>
+                    </div>
+                    <div className="mt-4 rounded-xl border border-zinc-800 bg-[#0d0d0d] p-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <p className="text-sm font-medium text-zinc-100">Billable Skills</p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-8 rounded-lg border-zinc-800 bg-[#111111] text-xs text-zinc-100 hover:bg-zinc-900"
+                          onClick={() => addSkill(capabilityIndex)}
+                        >
+                          Add Skill
+                        </Button>
+                      </div>
+                      <div className="space-y-3">
+                        {capability.skills.length === 0 ? (
+                          <p className="text-xs text-zinc-500">No billable skills configured.</p>
+                        ) : null}
+                        {capability.skills.map((skill, skillIndex) => (
+                          <div
+                            key={`${skill.skillKey}-${skillIndex}`}
+                            className="grid gap-3 rounded-xl border border-zinc-800 bg-[#111111] p-3 sm:grid-cols-4"
+                          >
+                            <label className="block">
+                              <span className="mb-2 block text-xs text-zinc-100">Key</span>
+                              <Input
+                                value={skill.skillKey}
+                                onChange={(event) =>
+                                  updateCapabilitySkill(capabilityIndex, skillIndex, "skillKey", event.target.value)
+                                }
+                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="mb-2 block text-xs text-zinc-100">Name</span>
+                              <Input
+                                value={skill.name}
+                                onChange={(event) =>
+                                  updateCapabilitySkill(capabilityIndex, skillIndex, "name", event.target.value)
+                                }
+                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                              />
+                            </label>
+                            <label className="block sm:col-span-2">
+                              <span className="mb-2 block text-xs text-zinc-100">Description</span>
+                              <Input
+                                value={skill.description}
+                                onChange={(event) =>
+                                  updateCapabilitySkill(capabilityIndex, skillIndex, "description", event.target.value)
+                                }
+                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="mb-2 block text-xs text-zinc-100">Price (USDC)</span>
+                              <Input
+                                value={skill.priceUsdc}
+                                onChange={(event) =>
+                                  updateCapabilitySkill(capabilityIndex, skillIndex, "priceUsdc", event.target.value)
+                                }
+                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                              />
+                            </label>
+                            <div className="flex items-end">
+                              <button
+                                type="button"
+                                className="h-10 text-xs text-zinc-500 hover:text-zinc-100"
+                                onClick={() => removeSkill(capabilityIndex, skillIndex)}
+                              >
+                                Remove Skill
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : null}
 
           {step === 2 ? (
-            <div className="grid gap-5 sm:grid-cols-2">
-              <label className="block sm:col-span-2">
-                <span className="mb-3 block text-[16px] text-zinc-100">
-                  Trust Signals (comma separated)
-                </span>
-                <Input
-                  value={form.trustSignalsInput}
-                  onChange={(event) => updateField("trustSignalsInput", event.target.value)}
-                  placeholder="SOC2, Human Review, Reputation Score"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">KYC / Validation Status</span>
-                <select
-                  value={form.kycStatus}
-                  onChange={(event) => updateField("kycStatus", event.target.value)}
-                  className="h-12 w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-                >
-                  <option>Unknown</option>
-                  <option>Pending</option>
-                  <option>Verified</option>
-                  <option>Not required</option>
-                </select>
-              </label>
-              <label className="block">
-                <span className="mb-3 block text-[16px] text-zinc-100">Support Email</span>
-                <Input
-                  value={form.supportEmail}
-                  onChange={(event) => updateField("supportEmail", event.target.value)}
-                  placeholder="support@example.com"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-              </label>
-              <label className="block sm:col-span-2">
-                <span className="mb-3 block text-[16px] text-zinc-100">Compliance Notes</span>
-                <textarea
-                  value={form.complianceNotes}
-                  onChange={(event) => updateField("complianceNotes", event.target.value)}
-                  className="min-h-[100px] w-full rounded-xl border border-zinc-800 bg-[#111111] px-4 py-3 text-sm text-zinc-100 outline-none transition-colors focus:border-zinc-700"
-                />
-              </label>
-              <label className="block sm:col-span-2">
-                <span className="mb-3 block text-[16px] text-zinc-100">Payout Policy</span>
-                <Input
-                  value={form.payoutPolicy}
-                  onChange={(event) => updateField("payoutPolicy", event.target.value)}
-                  placeholder="Instant settlement to seller wallet"
-                  className="h-12 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                />
-              </label>
-            </div>
-          ) : null}
-
-          {step === 3 ? (
             <div className="rounded-2xl border border-zinc-800 bg-[#111111] p-5">
               <div className="flex items-start gap-4">
                 <div className="flex size-14 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-lg font-semibold text-zinc-50">
@@ -644,13 +781,17 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
                   {(form.agentName.trim() && `${form.agentName.trim()} Studio`) || "Auto-generated"}
                 </p>
                 <p>
-                  <span className="text-zinc-500">Category:</span> {form.category || "General"}
+                  <span className="text-zinc-500">Capabilities:</span> {form.capabilities.length}
                 </p>
                 <p>
-                  <span className="text-zinc-500">Pricing:</span> {form.pricingModel}
+                  <span className="text-zinc-500">Primary Endpoint:</span> {form.capabilities[0]?.endpointUrl || "Not set"}
                 </p>
                 <p>
-                  <span className="text-zinc-500">Base Price:</span> {form.basePriceUsdc || "Not set"} USDC
+                  <span className="text-zinc-500">Starting Price:</span> {form.capabilities[0]?.priceUsdc || "Not set"} USDC
+                </p>
+                <p className="sm:col-span-2">
+                  <span className="text-zinc-500">Catalog:</span>{" "}
+                  {form.capabilities.map((capability) => capability.name || capability.toolKey || "Capability").join(", ")}
                 </p>
               </div>
             </div>
@@ -701,14 +842,45 @@ function DetailRow({ icon: Icon, label, value }) {
 }
 
 function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitError }) {
-  const initialBasePrice = agent.profile?.basePriceUsdc
-  const [basePriceUsdc, setBasePriceUsdc] = useState(
-    initialBasePrice && initialBasePrice !== "Not provided" ? initialBasePrice : "",
+  const [toolForms, setToolForms] = useState(
+    () =>
+      (agent.tools || []).map((tool) => ({
+        toolId: tool.toolId,
+        name: tool.name,
+        toolPriceUSDC: String(tool.priceUSDC ?? "0.01"),
+        runtimePriceUSDC: String(tool.runtimePriceUSDC ?? "0"),
+        skillPrices: (tool.skills || []).map((skill) => ({
+          skillId: skill.skillId,
+          name: skill.name,
+          priceUSDC: String(skill.priceUSDC ?? "0"),
+        })),
+      })) || [],
   )
 
   function handleSubmit(event) {
     event.preventDefault()
-    onSavePricing(basePriceUsdc)
+    onSavePricing(toolForms)
+  }
+
+  function updateTool(index, key, value) {
+    setToolForms((current) =>
+      current.map((tool, toolIndex) => (toolIndex === index ? { ...tool, [key]: value } : tool)),
+    )
+  }
+
+  function updateSkill(toolIndex, skillIndex, value) {
+    setToolForms((current) =>
+      current.map((tool, currentToolIndex) =>
+        currentToolIndex === toolIndex
+          ? {
+              ...tool,
+              skillPrices: tool.skillPrices.map((skill, currentSkillIndex) =>
+                currentSkillIndex === skillIndex ? { ...skill, priceUSDC: value } : skill,
+              ),
+            }
+          : tool,
+      ),
+    )
   }
 
   return (
@@ -723,10 +895,9 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
 
       <Card className="rounded-2xl border-zinc-800 bg-[#0d0d0d] text-zinc-50 shadow-none">
         <CardHeader className="space-y-2 p-6">
-          <h1 className="text-xl font-semibold">Update Agent Pricing</h1>
+          <h1 className="text-xl font-semibold">Update Capability Pricing</h1>
           <p className="text-sm text-zinc-400">
-            Set a new base price for this agent. The backend updates tool prices and the dashboard card
-            reflects the new minimum price after save.
+            Each capability settles on-chain. Update the tool charge, optional runtime charge, and any billable skills.
           </p>
         </CardHeader>
         <CardContent className="space-y-4 p-6 pt-0 text-sm text-zinc-300">
@@ -739,16 +910,48 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
           <p>
             <span className="text-zinc-500">Seller:</span> {agent.owner}
           </p>
-          <form className="space-y-4 rounded-xl border border-zinc-800 bg-[#111111] p-4" onSubmit={handleSubmit}>
-            <label className="block">
-              <span className="mb-2 block text-zinc-100">Base Price (USDC)</span>
-              <Input
-                value={basePriceUsdc}
-                onChange={(event) => setBasePriceUsdc(event.target.value)}
-                placeholder="0.01"
-                className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
-              />
-            </label>
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {toolForms.map((tool, toolIndex) => (
+              <div key={tool.toolId} className="rounded-xl border border-zinc-800 bg-[#111111] p-4">
+                <p className="mb-3 text-sm font-medium text-zinc-100">{tool.name}</p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="block">
+                    <span className="mb-2 block text-zinc-100">Tool Price (USDC)</span>
+                    <Input
+                      value={tool.toolPriceUSDC}
+                      onChange={(event) => updateTool(toolIndex, "toolPriceUSDC", event.target.value)}
+                      placeholder="0.01"
+                      className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-zinc-100">Runtime Price / Request</span>
+                    <Input
+                      value={tool.runtimePriceUSDC}
+                      onChange={(event) => updateTool(toolIndex, "runtimePriceUSDC", event.target.value)}
+                      placeholder="0.00"
+                      className="h-11 rounded-xl border-zinc-800 bg-[#0d0d0d] text-zinc-100"
+                    />
+                  </label>
+                </div>
+                {(tool.skillPrices || []).length ? (
+                  <div className="mt-4 space-y-3 rounded-xl border border-zinc-800 bg-[#0d0d0d] p-4">
+                    <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Billable Skills</p>
+                    {tool.skillPrices.map((skill, skillIndex) => (
+                      <label key={skill.skillId} className="block">
+                        <span className="mb-2 block text-zinc-100">{skill.name}</span>
+                        <Input
+                          value={skill.priceUSDC}
+                          onChange={(event) => updateSkill(toolIndex, skillIndex, event.target.value)}
+                          placeholder="0.00"
+                          className="h-11 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ))}
             {submitError ? (
               <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-2 text-xs text-red-200">
                 {submitError}
@@ -766,7 +969,7 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
                     Saving...
                   </>
                 ) : (
-                  "Save Pricing"
+                  "Save Capability Pricing"
                 )}
               </Button>
               <Button
@@ -787,6 +990,7 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
 }
 
 function AgentDetailScreen({ agent, onBack, onEditPricing }) {
+  const sellerBalances = agent.sellerBalances || {}
   return (
     <section className="mx-auto max-w-[1060px] px-0 py-8">
       <button
@@ -841,31 +1045,65 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
       <div className="mt-7 grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-6 lg:col-span-8">
           <MetricCard dotClassName="bg-blue-500" icon={Wallet} title="Service Catalog">
-            <div className="mt-1 flex flex-wrap gap-3">
-              {(agent.profile?.services || []).map((service) => (
-                <Badge
-                  key={service}
-                  variant="outline"
-                  className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300"
-                >
-                  {service}
-                </Badge>
+            <div className="space-y-4">
+              {(agent.tools || []).map((tool) => (
+                <div key={tool.toolId} className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-medium text-zinc-100">{tool.name}</p>
+                    <Badge
+                      variant="outline"
+                      className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300"
+                    >
+                      {tool.toolKey}
+                    </Badge>
+                    <Badge
+                      variant="outline"
+                      className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300"
+                    >
+                      {Number(tool.priceUSDC || 0).toFixed(4)} USDC
+                    </Badge>
+                    {Number(tool.runtimePriceUSDC || 0) > 0 ? (
+                      <Badge
+                        variant="outline"
+                        className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300"
+                      >
+                        Runtime {Number(tool.runtimePriceUSDC || 0).toFixed(4)} USDC
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <p className="mt-2 text-sm text-zinc-400">{tool.description || "No description provided."}</p>
+                  <div className="mt-3 grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
+                    <p>
+                      <span className="text-zinc-500">Endpoint:</span> {tool.endpointUrl}
+                    </p>
+                    <p>
+                      <span className="text-zinc-500">Method:</span> {tool.httpMethod}
+                    </p>
+                    <p>
+                      <span className="text-zinc-500">Category:</span> {tool.category}
+                    </p>
+                    <p>
+                      <span className="text-zinc-500">Runtime Unit:</span> {tool.runtimeUnit}
+                    </p>
+                  </div>
+                  {(tool.skills || []).length ? (
+                    <div className="mt-3">
+                      <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">Billable Skills</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {tool.skills.map((skill) => (
+                          <Badge
+                            key={skill.skillId}
+                            variant="outline"
+                            className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300"
+                          >
+                            {skill.name} · {Number(skill.priceUSDC || 0).toFixed(4)} USDC
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               ))}
-            </div>
-            <Separator className="my-4 bg-zinc-800" />
-            <div className="grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
-              <p>
-                <span className="text-zinc-500">API Base:</span> {agent.profile?.apiBaseUrl}
-              </p>
-              <p>
-                <span className="text-zinc-500">API Docs:</span> {agent.profile?.apiDocsUrl}
-              </p>
-              <p>
-                <span className="text-zinc-500">Category:</span> {agent.profile?.category}
-              </p>
-              <p>
-                <span className="text-zinc-500">SLA Tier:</span> {agent.profile?.slaTier}
-              </p>
             </div>
           </MetricCard>
 
@@ -876,10 +1114,10 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
                   <span className="text-zinc-500">Pricing Model:</span> {agent.profile?.pricingModel}
                 </p>
                 <p>
-                  <span className="text-zinc-500">Base Price (USDC):</span> {agent.profile?.basePriceUsdc}
+                  <span className="text-zinc-500">Starting Price (USDC):</span> {agent.profile?.basePriceUsdc}
                 </p>
                 <p className="sm:col-span-2">
-                  <span className="text-zinc-500">Payout Policy:</span> {agent.profile?.payoutPolicy}
+                  <span className="text-zinc-500">Capabilities:</span> {agent.toolCount} tools / {agent.skillCount} skills
                 </p>
               </div>
             </div>
@@ -910,14 +1148,14 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
               </div>
               <div className="grid gap-2 text-sm text-zinc-300 sm:grid-cols-2">
                 <p>
-                  <span className="text-zinc-500">KYC Status:</span> {agent.profile?.kycStatus}
+                  <span className="text-zinc-500">Network:</span> {agent.profile?.network}
                 </p>
                 <p>
-                  <span className="text-zinc-500">Support:</span> {agent.profile?.supportEmail}
+                  <span className="text-zinc-500">Arc Agent ID:</span> {agent.profile?.arcAgentId || "Pending"}
                 </p>
                 <p className="sm:col-span-2">
-                  <span className="text-zinc-500">Compliance Notes:</span>{" "}
-                  {agent.profile?.complianceNotes}
+                  <span className="text-zinc-500">Identity Tx:</span>{" "}
+                  {agent.profile?.identityTxHash || "Pending"}
                 </p>
               </div>
             </div>
@@ -950,17 +1188,19 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
               <div className="divide-y divide-zinc-800">
                 <DetailRow icon={Layers3} label="Composite Agent ID" value={agent.id} />
                 <DetailRow icon={Wallet} label="Seller Wallet" value={agent.wallet} />
+                <DetailRow
+                  icon={Wallet}
+                  label="Seller USDC Balance"
+                  value={sellerBalances.usdc ?? "Unavailable"}
+                />
                 <DetailRow icon={UserRoundPlus} label="Seller" value={agent.owner} />
                 <DetailRow icon={KeyRound} label="Authority" value={agent.authority} />
-              </div>
-              <div className="pt-4 text-xs text-zinc-500">
-                Some advanced fields are currently UI placeholders until backend persistence endpoints are
-                added.
               </div>
               <div className="space-y-2 pt-4">
                 <Button
                   variant="outline"
                   className="h-8 w-full justify-center gap-1.5 rounded-md border-zinc-800 bg-zinc-950 text-xs text-zinc-100 hover:bg-zinc-900"
+                  onClick={() => agent.invokePath && navigator.clipboard?.writeText(agent.invokePath)}
                 >
                   <ExternalLink data-icon="inline-start" />
                   {agent.explorerLabel}
@@ -984,8 +1224,8 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
 
 export default function App() {
   const [agents, setAgents] = useState([])
-  const [agentUiOverrides, setAgentUiOverrides] = useState({})
   const [routeState, setRouteState] = useState(() => readRouteFromPath())
+  const [selectedAgentDetail, setSelectedAgentDetail] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
   const [query, setQuery] = useState("")
@@ -994,36 +1234,23 @@ export default function App() {
   const [submitError, setSubmitError] = useState("")
   const [isPricingSubmitting, setIsPricingSubmitting] = useState(false)
   const [pricingSubmitError, setPricingSubmitError] = useState("")
-  const mergedAgents = useMemo(
-    () => agents.map((agent) => mergeAgentProfile(agent, agentUiOverrides[agent.id])),
-    [agentUiOverrides, agents],
-  )
+  const mergedAgents = agents
   const selectedAgent = mergedAgents.find((agent) => agent.id === routeState?.agentId) ?? null
+  const selectedAgentView = selectedAgent
+    ? {
+        ...selectedAgent,
+        tools: selectedAgentDetail?.tools || selectedAgent.tools || [],
+        sellerBalances: selectedAgentDetail?.sellerBalances || null,
+      }
+    : null
 
   async function refreshAgents({ showLoading = true } = {}) {
     if (showLoading) setIsLoading(true)
     setLoadError("")
 
     try {
-      const tools = await listMarketplaceTools()
-      const sellers = await listSellers()
-      const sellerDetailEntries = await Promise.all(
-        sellers.map(async (seller) => {
-          try {
-            return await getSeller(seller.id)
-          } catch {
-            return null
-          }
-        }),
-      )
-
-      const sellerDetailsById = Object.fromEntries(
-        sellerDetailEntries
-          .filter((detail) => detail?.seller?.id != null)
-          .map((detail) => [detail.seller.id, detail]),
-      )
-
-      setAgents(mapMarketplaceToAgentCards({ tools, sellerDetailsById }))
+      const marketplaceAgents = await listMarketplaceAgents()
+      setAgents(mapMarketplaceAgentsToCards(marketplaceAgents))
     } catch (error) {
       setLoadError(error.message || "Unknown error while fetching agents.")
       setAgents([])
@@ -1054,6 +1281,33 @@ export default function App() {
   useEffect(() => {
     setPage(1)
   }, [query])
+
+  useEffect(() => {
+    let ignore = false
+    async function loadAgentDetail() {
+      if (!selectedAgent) {
+        setSelectedAgentDetail(null)
+        return
+      }
+      try {
+        const sellerPayload = await getSeller(selectedAgent.sellerId)
+        const detailAgent = (sellerPayload.agents || []).find((agent) => agent.id === selectedAgent.agentId)
+        if (ignore || !detailAgent) return
+        setSelectedAgentDetail({
+          tools: detailAgent.tools || [],
+          sellerBalances: sellerPayload.balances || null,
+        })
+      } catch {
+        if (!ignore) {
+          setSelectedAgentDetail(null)
+        }
+      }
+    }
+    loadAgentDetail()
+    return () => {
+      ignore = true
+    }
+  }, [selectedAgent])
 
   const filteredAgents = useMemo(() => {
     const normalized = normalizeSearch(query)
@@ -1091,48 +1345,74 @@ export default function App() {
     setSubmitError("")
 
     try {
-      const walletAddress = form.wallet.trim() || `demo-wallet-${Date.now()}`
       const agentName = form.agentName.trim() || "Untitled Agent"
       const agentDescription = form.agentDescription.trim() || ""
+      if (!agentDescription) {
+        throw new Error("Agent description is required.")
+      }
+      if (!form.capabilities.length) {
+        throw new Error("At least one capability is required.")
+      }
+      const capabilities = form.capabilities.map((capability, index) => {
+        const toolPrice = Number(capability.priceUsdc)
+        const runtimePrice = Number(capability.runtimePriceUsdc || "0")
+        if (!capability.endpointUrl.trim()) {
+          throw new Error(`Capability ${index + 1} endpoint URL is required.`)
+        }
+        if (!Number.isFinite(toolPrice) || toolPrice <= 0 || toolPrice > 0.01) {
+          throw new Error(`Capability ${index + 1} tool price must be greater than 0 and no more than 0.01 USDC.`)
+        }
+        if (!Number.isFinite(runtimePrice) || runtimePrice < 0 || runtimePrice > 0.01) {
+          throw new Error(`Capability ${index + 1} runtime price must be between 0 and 0.01 USDC.`)
+        }
+        const skills = capability.skills.map((skill, skillIndex) => {
+          const skillPrice = Number(skill.priceUsdc || "0")
+          if (!Number.isFinite(skillPrice) || skillPrice < 0 || skillPrice > 0.01) {
+            throw new Error(
+              `Capability ${index + 1} skill ${skillIndex + 1} price must be between 0 and 0.01 USDC.`,
+            )
+          }
+          return {
+            skillKey: skill.skillKey.trim() || `skill-${skillIndex + 1}`,
+            name: skill.name.trim() || `Skill ${skillIndex + 1}`,
+            description: skill.description.trim(),
+            priceUSDC: skillPrice,
+          }
+        })
+        return {
+          toolKey: capability.toolKey.trim() || `tool-${index + 1}`,
+          name: capability.name.trim() || `Capability ${index + 1}`,
+          description: capability.description.trim() || agentDescription,
+          category: capability.category.trim() || "General",
+          endpointUrl: capability.endpointUrl.trim(),
+          httpMethod: capability.httpMethod,
+          priceUSDC: toolPrice,
+          runtimePriceUSDC: runtimePrice,
+          runtimeUnit: runtimePrice > 0 ? "per_request" : "none",
+          skills,
+        }
+      })
       const seller = await createSeller({
         name: `${agentName} Studio`,
         description: `Seller profile for ${agentName}`,
-        ownerWalletAddress: walletAddress,
+        ownerWalletAddress: form.wallet.trim(),
         validatorWalletAddress: "",
       })
 
       const agent = await createAgent(seller.id, {
         name: agentName,
         description: agentDescription,
+        category: capabilities[0]?.category || "General",
+        endpointUrl: capabilities[0]?.endpointUrl || "",
+        httpMethod: capabilities[0]?.httpMethod || "POST",
+        priceUSDC: capabilities[0]?.priceUSDC || 0.01,
+        apiDocsUrl: form.apiDocsUrl.trim(),
         metadataUri: form.metadataUri.trim(),
         iconDataUrl: form.imagePreviewDataUrl || "",
-        basePriceUSDC: Number(form.basePriceUsdc) > 0 ? Number(form.basePriceUsdc) : undefined,
+        capabilities,
       })
 
       const createdId = makeAgentCompositeId(seller.id, agent.id)
-      const services = splitCommaValues(form.servicesInput)
-      const trustSignals = splitCommaValues(form.trustSignalsInput)
-      setAgentUiOverrides((current) => ({
-        ...current,
-        [createdId]: {
-          avatarImage: form.imagePreviewDataUrl || "",
-          tags: trustSignals.length ? trustSignals : ["Pending verification"],
-          profile: {
-            category: form.category.trim() || "General",
-            services: services.length ? services : ["Summarize", "Analyze", "Plan", "Response"],
-            apiBaseUrl: form.apiBaseUrl.trim() || "Not provided",
-            apiDocsUrl: form.apiDocsUrl.trim() || "Not provided",
-            slaTier: form.slaTier,
-            pricingModel: form.pricingModel,
-            trustSignals: trustSignals.length ? trustSignals : ["Not provided"],
-            complianceNotes: form.complianceNotes.trim() || "Not provided",
-            kycStatus: form.kycStatus,
-            supportEmail: form.supportEmail.trim() || "Not provided",
-            payoutPolicy: form.payoutPolicy.trim() || "Not provided",
-          },
-        },
-      }))
-
       await refreshAgents({ showLoading: false })
 
       pushPath(`/agents/${encodeURIComponent(createdId)}`)
@@ -1147,30 +1427,27 @@ export default function App() {
 
   async function saveAgentPricing(basePriceValue) {
     if (!selectedAgent) return
-    const parsed = Number(basePriceValue)
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      setPricingSubmitError("Base price must be a positive number.")
-      return
-    }
-
     setPricingSubmitError("")
     setIsPricingSubmitting(true)
     try {
-      await updateAgentPricing(selectedAgent.sellerId, selectedAgent.agentId, { basePriceUSDC: parsed })
-      setAgentUiOverrides((current) => {
-        const existing = current[selectedAgent.id]
-        if (!existing?.profile) return current
-        return {
-          ...current,
-          [selectedAgent.id]: {
-            ...existing,
-            profile: {
-              ...existing.profile,
-              basePriceUsdc: parsed.toFixed(2),
-            },
-          },
+      for (const tool of basePriceValue) {
+        const toolPrice = Number(tool.toolPriceUSDC)
+        const runtimePrice = Number(tool.runtimePriceUSDC || "0")
+        if (!Number.isFinite(toolPrice) || toolPrice <= 0 || toolPrice > 0.01) {
+          throw new Error(`Tool price for ${tool.name} must be greater than 0 and no more than 0.01 USDC.`)
         }
-      })
+        if (!Number.isFinite(runtimePrice) || runtimePrice < 0 || runtimePrice > 0.01) {
+          throw new Error(`Runtime price for ${tool.name} must be between 0 and 0.01 USDC.`)
+        }
+        await updateToolPricing(selectedAgent.sellerId, selectedAgent.agentId, tool.toolId, {
+          toolPriceUSDC: toolPrice,
+          runtimePriceUSDC: runtimePrice,
+          skillPrices: (tool.skillPrices || []).map((skill) => ({
+            skillId: skill.skillId,
+            priceUSDC: Number(skill.priceUSDC || "0"),
+          })),
+        })
+      }
       await refreshAgents({ showLoading: false })
       openAgent(selectedAgent, "detail")
     } catch (error) {
@@ -1221,7 +1498,7 @@ export default function App() {
             />
           ) : selectedAgent && routeState?.page === "edit" ? (
             <AgentEditScreen
-              agent={selectedAgent}
+              agent={selectedAgentView}
               onBack={() => openAgent(selectedAgent, "detail")}
               onSavePricing={saveAgentPricing}
               isSubmitting={isPricingSubmitting}
@@ -1229,7 +1506,7 @@ export default function App() {
             />
           ) : selectedAgent ? (
             <AgentDetailScreen
-              agent={selectedAgent}
+              agent={selectedAgentView}
               onBack={goBackToRegistry}
               onEditPricing={(agent) => openAgent(agent, "edit")}
             />
