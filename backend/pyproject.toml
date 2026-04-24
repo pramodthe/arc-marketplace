@@ -34,5 +34,8 @@ arc-demo-marketplace = "agents_market.arc.cli.demo_marketplace:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents_market"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/agents_market/arc/bridge/arc_app_kit_bridge_worker.mjs" = "agents_market/arc/bridge/arc_app_kit_bridge_worker.mjs"
+
 [tool.uv.sources]
 circle-titanoboa-sdk = { path = "../../circle-titanoboa-sdk", editable = true }

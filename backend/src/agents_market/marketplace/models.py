@@ -187,6 +187,25 @@ class BridgeTransfer(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ExternalFundingAttempt(Base):
+    __tablename__ = "external_funding_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    buyer_id: Mapped[int] = mapped_column(ForeignKey("buyers.id"), index=True)
+    source_chain: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_chain: Mapped[str] = mapped_column(String(64), default="Arc_Testnet", nullable=False)
+    amount_usdc: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), default="queued", nullable=False)
+    transfer_ref: Mapped[str] = mapped_column(String(128), default="", nullable=False, index=True)
+    bridge_result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    steps: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    tx_hashes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    explorer_urls: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class BuyerInvocation(Base):
     __tablename__ = "buyer_invocations"
 

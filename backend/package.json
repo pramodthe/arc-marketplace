@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bridge:estimate": "node src/agents_market/arc/bridge/arc_app_kit_bridge_worker.mjs estimate",
+    "bridge:execute": "node src/agents_market/arc/bridge/arc_app_kit_bridge_worker.mjs bridge"
+  },
+  "dependencies": {
+    "@circle-fin/adapter-viem-v2": "^1.1.1",
+    "@circle-fin/app-kit": "^1.0.0",
+    "viem": "^2.31.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

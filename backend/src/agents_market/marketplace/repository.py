@@ -13,6 +13,7 @@ from agents_market.marketplace.models import (
     Buyer,
     BuyerInvocation,
     BridgeTransfer,
+    ExternalFundingAttempt,
     GatewayAccount,
     PaymentEvent,
     ReputationEvent,
@@ -580,6 +581,54 @@ def create_bridge_transfer(
     db.commit()
     db.refresh(row)
     return row
+
+
+def create_external_funding_attempt(
+    db: Session,
+    *,
+    buyer_id: int,
+    source_chain: str,
+    destination_chain: str,
+    amount_usdc: str,
+    status: str,
+    transfer_ref: str,
+    bridge_result: dict[str, Any] | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    tx_hashes: list[str] | None = None,
+    explorer_urls: list[str] | None = None,
+    error: str = "",
+) -> ExternalFundingAttempt:
+    row = ExternalFundingAttempt(
+        buyer_id=buyer_id,
+        source_chain=source_chain,
+        destination_chain=destination_chain,
+        amount_usdc=amount_usdc,
+        status=status,
+        transfer_ref=transfer_ref,
+        bridge_result=bridge_result or {},
+        steps=steps or [],
+        tx_hashes=tx_hashes or [],
+        explorer_urls=explorer_urls or [],
+        error=error,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_external_funding_attempt(
+    db: Session,
+    *,
+    buyer_id: int,
+    transfer_id: int,
+) -> ExternalFundingAttempt | None:
+    return db.scalar(
+        select(ExternalFundingAttempt).where(
+            ExternalFundingAttempt.id == transfer_id,
+            ExternalFundingAttempt.buyer_id == buyer_id,
+        )
+    )
 
 
 def create_buyer_invocation(

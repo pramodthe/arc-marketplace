@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
+import subprocess
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from json import JSONDecodeError
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from agents_market._env import load_backend_env
 from agents_market.arc.services.erc8004 import (
@@ -45,6 +49,7 @@ from agents_market.marketplace.repository import (
     create_buyer,
     create_buyer_invocation,
     create_bridge_transfer,
+    create_external_funding_attempt,
     create_payment_event,
     create_reputation_event,
     create_usage_records,
@@ -52,6 +57,7 @@ from agents_market.marketplace.repository import (
     create_validation_request,
     get_agent,
     get_buyer,
+    get_external_funding_attempt,
     get_seller,
     get_tool_for_agent,
     get_validation_request,
@@ -132,6 +138,12 @@ class BuyerCreateBody(BaseModel):
     validatorWalletAddress: str = ""
 
 
+class ExternalBuyerCreateBody(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    organization: str = ""
+    description: str = ""
+
+
 class InvokeBody(BaseModel):
     prompt: str = "Give me a short Arc ecosystem update."
     buyerId: int | None = None
@@ -174,6 +186,18 @@ class GatewayDepositBody(BaseModel):
 
 DEMO_TREASURY_MODE = "shared_demo_treasury"
 DEMO_TREASURY_CHAIN = "arcTestnet"
+ARC_SETTLEMENT_CHAIN = "Arc_Testnet"
+ARC_SETTLEMENT_CHAIN_ID = 5042002
+ARC_USDC_DECIMALS = 6
+FUNDING_RAIL = "circle-app-kit-bridge-cctp"
+SUPPORTED_FUNDING_SOURCE_CHAINS = (
+    "Ethereum_Sepolia",
+    "Base_Sepolia",
+    "Arbitrum_Sepolia",
+    "Avalanche_Fuji",
+    "Optimism_Sepolia",
+    "Polygon_Amoy_Testnet",
+)
 ONCHAIN_TX_HASH_RE = re.compile(r"^(?:0x)?[a-fA-F0-9]{64}$")
 ARCSCAN_TX_URL = "https://testnet.arcscan.app/tx/"
 
@@ -187,6 +211,12 @@ class BridgeTransferBody(BaseModel):
     destinationChain: str
     amountUSDC: float = Field(gt=0)
     speed: str = "standard"
+
+
+class ExternalFundingBody(BaseModel):
+    sourceChain: str = Field(min_length=1, max_length=64)
+    amountUSDC: str = Field(min_length=1, max_length=64)
+    transferSpeed: str = "FAST"
 
 
 class AgentPricingUpdateBody(BaseModel):
@@ -664,6 +694,129 @@ def _discover_score(
 
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "http://localhost:4021").rstrip("/")
+
+
+def _funding_metadata() -> dict[str, Any]:
+    base = _public_base_url()
+    return {
+        "paymentProtocol": "arc-usdc",
+        "settlementNetwork": ARC_SETTLEMENT_CHAIN,
+        "settlementChainId": ARC_SETTLEMENT_CHAIN_ID,
+        "asset": "USDC",
+        "assetDecimals": ARC_USDC_DECIMALS,
+        "acceptedFundingRails": [FUNDING_RAIL],
+        "acceptedSourceChains": list(SUPPORTED_FUNDING_SOURCE_CHAINS),
+        "fundingEstimateUrl": f"{base}/external-buyers/{{buyerId}}/funding/estimate",
+        "fundingBridgeUrl": f"{base}/external-buyers/{{buyerId}}/funding/bridge",
+        "requiresBuyerArcRegistration": False,
+    }
+
+
+def _with_funding_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(payload)
+    enriched["payment"] = _funding_metadata()
+    return enriched
+
+
+def _normalize_source_chain(source_chain: str) -> str:
+    normalized = source_chain.strip()
+    if normalized not in SUPPORTED_FUNDING_SOURCE_CHAINS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unsupported source chain for external buyer funding",
+                "supportedSourceChains": list(SUPPORTED_FUNDING_SOURCE_CHAINS),
+            },
+        )
+    return normalized
+
+
+def _normalize_funding_amount(amount_usdc: str) -> str:
+    try:
+        amount = Decimal(str(amount_usdc).strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="amountUSDC must be a decimal string") from None
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amountUSDC must be greater than zero")
+    if amount.as_tuple().exponent < -ARC_USDC_DECIMALS:
+        raise HTTPException(status_code=400, detail="amountUSDC supports up to 6 decimal places")
+    return f"{amount.normalize():f}"
+
+
+def _normalize_transfer_speed(speed: str) -> str:
+    normalized = speed.strip().upper()
+    if normalized not in {"FAST", "SLOW"}:
+        raise HTTPException(status_code=400, detail="transferSpeed must be FAST or SLOW")
+    return normalized
+
+
+def _bridge_worker_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "bridge" / "arc_app_kit_bridge_worker.mjs"
+
+
+def _run_bridge_worker(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    worker_path = _bridge_worker_path()
+    command = [os.getenv("NODE_BINARY", "node"), str(worker_path), action]
+    env = {
+        **os.environ,
+        "ARC_BRIDGE_WORKER_PAYLOAD": json.dumps(payload),
+    }
+    try:
+        completed = subprocess.run(
+            command,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("ARC_BRIDGE_WORKER_TIMEOUT_SECONDS", "600")),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="Node.js is required for Arc App Kit bridge worker") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Arc App Kit bridge worker timed out") from exc
+
+    try:
+        result = json.loads(completed.stdout.strip() or "{}")
+    except JSONDecodeError as exc:
+        stderr = completed.stderr.strip()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Arc App Kit bridge worker returned invalid JSON: {stderr[:300]}",
+        ) from exc
+    if completed.returncode != 0:
+        message = result.get("error") or completed.stderr.strip() or "Arc App Kit bridge worker failed"
+        raise HTTPException(status_code=502, detail=message)
+    return result
+
+
+def _bridge_step_strings(result: dict[str, Any], key: str) -> list[str]:
+    values: list[str] = []
+    for step in result.get("steps", []) if isinstance(result.get("steps"), list) else []:
+        if not isinstance(step, dict):
+            continue
+        candidate = step.get(key) or (step.get("data", {}) if isinstance(step.get("data"), dict) else {}).get(key)
+        if candidate:
+            values.append(str(candidate))
+    return values
+
+
+def _external_funding_payload(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "buyerId": row.buyer_id,
+        "sourceChain": row.source_chain,
+        "destinationChain": row.destination_chain,
+        "amountUSDC": row.amount_usdc,
+        "status": row.status,
+        "transferRef": row.transfer_ref,
+        "steps": row.steps,
+        "txHashes": row.tx_hashes,
+        "explorerUrls": row.explorer_urls,
+        "error": row.error,
+        "bridgeResult": row.bridge_result,
+        "createdAt": row.created_at.isoformat(),
+        "updatedAt": row.updated_at.isoformat(),
+    }
 
 
 def _external_agent_card_urls() -> list[str]:
@@ -1360,6 +1513,120 @@ async def buyer_balances(buyer_id: int, db: Session = Depends(get_db)):
     return {"balances": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address)}
 
 
+@app.post("/external-buyers")
+async def create_external_buyer_endpoint(body: ExternalBuyerCreateBody, db: Session = Depends(get_db)):
+    buyer = create_buyer(
+        db,
+        name=body.name,
+        organization=body.organization,
+        description=body.description,
+        wallet_address="",
+        validator_wallet_address="",
+    )
+    _ensure_buyer_arc_wallets(buyer, db)
+    return {
+        "buyer": _buyer_api_payload(buyer),
+        "funding": {
+            **_funding_metadata(),
+            "destinationAddress": buyer.wallet_address,
+            "destinationChain": ARC_SETTLEMENT_CHAIN,
+        },
+    }
+
+
+@app.post("/external-buyers/{buyer_id}/funding/estimate")
+async def estimate_external_buyer_funding(
+    buyer_id: int,
+    body: ExternalFundingBody,
+    db: Session = Depends(get_db),
+):
+    buyer = get_buyer(db, buyer_id)
+    if buyer is None:
+        raise HTTPException(status_code=404, detail="Buyer not found")
+    _ensure_buyer_arc_wallets(buyer, db)
+    source_chain = _normalize_source_chain(body.sourceChain)
+    amount_usdc = _normalize_funding_amount(body.amountUSDC)
+    transfer_speed = _normalize_transfer_speed(body.transferSpeed)
+    estimate = await run_in_threadpool(
+        _run_bridge_worker,
+        "estimate",
+        {
+            "sourceChain": source_chain,
+            "destinationChain": ARC_SETTLEMENT_CHAIN,
+            "destinationAddress": buyer.wallet_address,
+            "amountUSDC": amount_usdc,
+            "transferSpeed": transfer_speed,
+        },
+    )
+    return {
+        "buyer": _buyer_api_payload(buyer),
+        "estimate": estimate,
+        "funding": {
+            **_funding_metadata(),
+            "destinationAddress": buyer.wallet_address,
+            "destinationChain": ARC_SETTLEMENT_CHAIN,
+        },
+    }
+
+
+@app.post("/external-buyers/{buyer_id}/funding/bridge")
+async def bridge_external_buyer_funding(
+    buyer_id: int,
+    body: ExternalFundingBody,
+    db: Session = Depends(get_db),
+):
+    buyer = get_buyer(db, buyer_id)
+    if buyer is None:
+        raise HTTPException(status_code=404, detail="Buyer not found")
+    _ensure_buyer_arc_wallets(buyer, db)
+    source_chain = _normalize_source_chain(body.sourceChain)
+    amount_usdc = _normalize_funding_amount(body.amountUSDC)
+    transfer_speed = _normalize_transfer_speed(body.transferSpeed)
+    transfer_ref = f"external_bridge_{uuid.uuid4().hex[:16]}"
+    result = await run_in_threadpool(
+        _run_bridge_worker,
+        "bridge",
+        {
+            "sourceChain": source_chain,
+            "destinationChain": ARC_SETTLEMENT_CHAIN,
+            "destinationAddress": buyer.wallet_address,
+            "amountUSDC": amount_usdc,
+            "transferSpeed": transfer_speed,
+            "transferRef": transfer_ref,
+        },
+    )
+    bridge_result = result.get("bridgeResult") if isinstance(result.get("bridgeResult"), dict) else result
+    status = str(bridge_result.get("state") or result.get("status") or "pending")
+    error = str(result.get("error") or bridge_result.get("error") or "")
+    row = create_external_funding_attempt(
+        db,
+        buyer_id=buyer.id,
+        source_chain=source_chain,
+        destination_chain=ARC_SETTLEMENT_CHAIN,
+        amount_usdc=amount_usdc,
+        status=status,
+        transfer_ref=transfer_ref,
+        bridge_result=bridge_result,
+        steps=bridge_result.get("steps") if isinstance(bridge_result.get("steps"), list) else [],
+        tx_hashes=_bridge_step_strings(bridge_result, "txHash"),
+        explorer_urls=_bridge_step_strings(bridge_result, "explorerUrl"),
+        error=error,
+    )
+    return {"fundingTransfer": _external_funding_payload(row), "buyer": _buyer_api_payload(buyer)}
+
+
+@app.get("/external-buyers/{buyer_id}/funding/{transfer_id}")
+async def get_external_buyer_funding(
+    buyer_id: int,
+    transfer_id: int,
+    db: Session = Depends(get_db),
+):
+    row = get_external_funding_attempt(db, buyer_id=buyer_id, transfer_id=transfer_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Funding transfer not found")
+    return {"fundingTransfer": _external_funding_payload(row)}
+
+
 @app.post("/sellers")
 async def create_seller_endpoint(body: SellerCreateBody, db: Session = Depends(get_db)):
     seller = create_seller(
@@ -1514,17 +1781,23 @@ async def seller_balances(seller_id: int, db: Session = Depends(get_db)):
 
 @app.get("/marketplace/tools")
 async def marketplace_tools(db: Session = Depends(get_db)):
-    return {"tools": list_tools_for_marketplace(db)}
+    return {"tools": [_with_funding_metadata(tool) for tool in list_tools_for_marketplace(db)]}
 
 
 @app.get("/marketplace/agents")
 async def marketplace_agents(db: Session = Depends(get_db)):
-    return {"agents": list_agents_for_marketplace(db)}
+    agents = []
+    for agent in list_agents_for_marketplace(db):
+        enriched = _with_funding_metadata(agent)
+        enriched["commerce"] = {**agent.get("commerce", {}), **_funding_metadata()}
+        enriched["tools"] = [_with_funding_metadata(tool) for tool in agent.get("tools", [])]
+        agents.append(enriched)
+    return {"agents": agents}
 
 
 @app.post("/marketplace/discover")
 async def marketplace_discover(body: DiscoverBody, db: Session = Depends(get_db)):
-    tools = list_tools_for_marketplace(db)
+    tools = [_with_funding_metadata(tool) for tool in list_tools_for_marketplace(db)]
     internal_candidates = _internal_discovery_candidates(tools)
     external_candidates = await _fetch_external_candidates()
     all_candidates = internal_candidates + external_candidates
@@ -1591,6 +1864,16 @@ async def agent_card(db: Session = Depends(get_db)):
                 "outputModes": ["application/json"],
                 "x402PriceUSDC": tool["priceUSDC"],
                 "x402Network": "arcTestnet",
+                "paymentProtocol": "arc-usdc",
+                "settlementNetwork": ARC_SETTLEMENT_CHAIN,
+                "settlementChainId": ARC_SETTLEMENT_CHAIN_ID,
+                "asset": "USDC",
+                "assetDecimals": ARC_USDC_DECIMALS,
+                "acceptedFundingRails": [FUNDING_RAIL],
+                "acceptedSourceChains": list(SUPPORTED_FUNDING_SOURCE_CHAINS),
+                "fundingEstimateUrl": f"{_public_base_url()}/external-buyers/{{buyerId}}/funding/estimate",
+                "fundingBridgeUrl": f"{_public_base_url()}/external-buyers/{{buyerId}}/funding/bridge",
+                "requiresBuyerArcRegistration": False,
                 "category": tool.get("category", tool["agent"].get("category", "General")),
                 "providerEndpointHost": (
                     urlparse(tool.get("endpointUrl", tool["agent"].get("endpointUrl", ""))).netloc
@@ -1616,6 +1899,7 @@ async def agent_card(db: Session = Depends(get_db)):
             "type": "buyer-id-or-x402",
             "instructions": "Preferred: send buyerId for custodial on-chain settlement. x402 headers remain compatibility-only.",
         },
+        "payment": _funding_metadata(),
         "skills": skills,
     }
 

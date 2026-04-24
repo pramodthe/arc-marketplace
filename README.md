@@ -16,13 +16,14 @@ The repository has:
 ### Core implemented flows
 - **Marketplace CRUD + discovery**: create sellers/agents, list tools, and rank tools by prompt + budget.
 - **Paid invocation flow**: buyer pays via x402/Gateway before calling seller tool endpoints.
+- **Cross-network buyer funding**: external buyers can fund Arc buyer wallets from other testnets using Circle App Kit Bridge (CCTP).
 - **Ledgering**: payment and output events are persisted for transaction/frequency reporting.
 - **Arc lifecycle endpoints**: ERC-8004 style register/reputation/validation request/response flows.
 - **Wallet/gateway operations**: provision Circle developer-controlled wallets and operate a shared demo Gateway treasury for balance/deposit checks.
 - **CLI utilities**: buyer/seller client runs, deposit, keygen, registration, demo data seeding.
 
 ### Current limitations (important)
-- **Bridge transfer endpoint is an orchestration stub** (records queued transfer metadata; does not execute a full bridge route yet).
+- **Seller bridge endpoint remains a stub** (`POST /sellers/{seller_id}/bridge/transfers` still records queued metadata for compatibility).
 - **Provider listings require Circle/Arc environment variables** because active listings are automatically registered on Arc ERC-8004.
 
 ---
@@ -112,6 +113,10 @@ Use `backend/.env.example` as the source of truth. Key variables:
 - **Circle + Arc integration**
   - `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`.
   - `ARC_RPC_URL` (default Arc testnet RPC; mostly needed for Arc lifecycle/read endpoints).
+- **External buyer bridge worker**
+  - `ARC_BRIDGE_WORKER_MODE` (`mock` for local tests, unset/real for on-chain execution).
+  - `ARC_BRIDGE_EVM_PRIVATE_KEY` (source-chain signer for bridge approve/burn).
+  - `ARC_BRIDGE_WORKER_TIMEOUT_SECONDS`, `NODE_BINARY`.
 
 ---
 
@@ -273,7 +278,13 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
 - `POST /sellers/{seller_id}/gateway/deposit`
 - `GET /sellers/{seller_id}/gateway/balances`
 - `GET /gateway/demo-treasury/balances`
-- `POST /sellers/{seller_id}/bridge/transfers` (currently recorded as queued orchestration stub)
+- `POST /sellers/{seller_id}/bridge/transfers` (compatibility stub for seller-scoped bridge records)
+
+### External buyer cross-network funding
+- `POST /external-buyers` (create a buyer profile with Arc destination wallet context)
+- `POST /external-buyers/{buyer_id}/funding/estimate` (quote bridge fees/route from source chain to Arc)
+- `POST /external-buyers/{buyer_id}/funding/bridge` (execute CCTP bridge flow)
+- `GET /external-buyers/{buyer_id}/funding/{transfer_id}` (inspect transfer state, steps, tx hashes, explorer links)
 
 ### Compatibility/discovery metadata
 - `GET /.well-known/agent-card.json`
@@ -293,6 +304,20 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
 
 This design is what enables per-action monetization and high-frequency transaction logging for hackathon evidence.
 
+## Cross-network buyer flow (discover -> fund -> invoke)
+
+1. Buyer discovers tools using `POST /marketplace/discover` or `GET /marketplace/tools`.
+2. Discovery metadata includes funding fields (`paymentProtocol`, `settlementNetwork`, `acceptedSourceChains`, funding URLs).
+3. External buyer creates profile via `POST /external-buyers`.
+4. Buyer estimates bridge route via `POST /external-buyers/{buyer_id}/funding/estimate`.
+5. Buyer executes bridge via `POST /external-buyers/{buyer_id}/funding/bridge`.
+6. Buyer polls `GET /external-buyers/{buyer_id}/funding/{transfer_id}` until `status=success`.
+7. Buyer invokes provider tool with `buyerId` on `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`.
+
+Notes:
+- x402 nanopayment and CCTP bridge are different layers. Bridge moves USDC cross-chain; invoke settlement runs on Arc after funding.
+- For EVM source chains, the source wallet needs both USDC and native gas token (e.g., Sepolia ETH).
+
 ---
 
 ## Hackathon Payment Model
@@ -311,6 +336,7 @@ This design is what enables per-action monetization and high-frequency transacti
 - Per-action low-cost priced tools: implemented.
 - Transaction event persistence for frequency reporting: implemented.
 - Bridge/liquidity advanced workflow execution: partially implemented (bridge endpoint currently stubbed).
+- External buyer cross-network bridge execution (estimate + approve + burn + attestation + mint): implemented.
 - End-to-end polished frontend integration: implemented for marketplace browsing, listing creation, and pricing updates.
 
 ---

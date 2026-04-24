@@ -203,6 +203,17 @@ Wallet/treasury:
 - `GET /gateway/demo-treasury/balances`
 - `POST /sellers/{seller_id}/bridge/transfers`
 
+External buyer funding:
+
+- `POST /external-buyers` - create an outside buyer profile with a platform Arc wallet
+- `POST /external-buyers/{buyer_id}/funding/estimate` - estimate Circle Arc App Kit / Bridge Kit funding into Arc Testnet
+- `POST /external-buyers/{buyer_id}/funding/bridge` - execute or mock a USDC bridge into the buyer Arc wallet
+- `GET /external-buyers/{buyer_id}/funding/{transfer_id}` - inspect bridge state, steps, tx hashes, explorer URLs, and errors
+
+Discovery responses include funding metadata (`paymentProtocol`, `settlementNetwork`, `acceptedSourceChains`, and funding URLs) so external A2A/OpenAPI clients can discover first, fund second, then invoke with `buyerId`.
+
+For local demos/tests set `ARC_BRIDGE_WORKER_MODE=mock`. For real EVM testnet funding, install the Node dependencies from `backend/package.json` and set `ARC_BRIDGE_EVM_PRIVATE_KEY` or `PRIVATE_KEY` for the source wallet used by Arc App Kit.
+
 ## CLI commands
 
 - `uv run arc-seller` - start marketplace API
