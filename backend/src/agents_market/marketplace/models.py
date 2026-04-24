@@ -59,6 +59,12 @@ class Agent(Base):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     metadata_uri: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     icon_data_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    category: Mapped[str] = mapped_column(String(80), default="General", nullable=False)
+    endpoint_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    http_method: Mapped[str] = mapped_column(String(12), default="POST", nullable=False)
+    api_docs_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    health_status: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     arc_agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     identity_tx_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
@@ -79,11 +85,35 @@ class Tool(Base):
     slug: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     price_usdc: Mapped[float] = mapped_column(Float, nullable=False)
+    endpoint_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    http_method: Mapped[str] = mapped_column(String(12), default="POST", nullable=False)
+    category: Mapped[str] = mapped_column(String(80), default="General", nullable=False)
+    runtime_price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    runtime_unit: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
+    capability_type: Mapped[str] = mapped_column(String(32), default="tool", nullable=False)
+    config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     agent: Mapped[Agent] = relationship(back_populates="tools")
+    skills: Mapped[list["Skill"]] = relationship(back_populates="tool", cascade="all, delete-orphan")
+
+
+class Skill(Base):
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"), index=True)
+    skill_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    tool: Mapped[Tool] = relationship(back_populates="skills")
 
 
 class PaymentEvent(Base):
@@ -172,3 +202,26 @@ class BuyerInvocation(Base):
     transaction_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(64), default="completed", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    usage_records: Mapped[list["UsageRecord"]] = relationship(
+        back_populates="buyer_invocation",
+        cascade="all, delete-orphan",
+    )
+
+
+class UsageRecord(Base):
+    __tablename__ = "usage_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    buyer_invocation_id: Mapped[int | None] = mapped_column(ForeignKey("buyer_invocations.id"), nullable=True, index=True)
+    payment_event_id: Mapped[int | None] = mapped_column(ForeignKey("payment_events.id"), nullable=True, index=True)
+    tool_id: Mapped[int | None] = mapped_column(ForeignKey("tools.id"), nullable=True, index=True)
+    skill_id: Mapped[int | None] = mapped_column(ForeignKey("skills.id"), nullable=True, index=True)
+    component_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    component_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    component_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    units: Mapped[float] = mapped_column(Float, default=1, nullable=False)
+    unit_price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    subtotal_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    buyer_invocation: Mapped[BuyerInvocation | None] = relationship(back_populates="usage_records")

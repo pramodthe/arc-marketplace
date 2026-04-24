@@ -7,9 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 ROOT_ENV_FILE="${ROOT_ENV_FILE:-$SCRIPT_DIR/../../.env}"
-BACKEND_BASE_URL="${BACKEND_BASE_URL:-http://localhost:4021}"
+BACKEND_BASE_URL="${BACKEND_BASE_URL:-http://localhost:4022}"
 EXPLORER_BASE_URL="${EXPLORER_BASE_URL:-https://testnet.arcscan.app}"
-ALPHA_SELLER_WALLET_ADDRESS="0xaBB7D9CD054b1E78074c25f8E65c291015871847"
 
 # Optional explicit overrides:
 # BUYER_WALLET_ADDRESS=0x...
@@ -100,13 +99,25 @@ except Exception:
     print("{}")
     raise SystemExit
 events = data.get("events", [])
-print(json.dumps(events[0]) if events else "{}")
+for event in events:
+    ref = (
+        event.get("onchainTxHash")
+        or event.get("transactionRef")
+        or event.get("details", {}).get("onchainTxHash")
+        or event.get("details", {}).get("transaction")
+        or event.get("details", {}).get("transactionRef")
+    )
+    if ref:
+        print(json.dumps(event))
+        break
+else:
+    print(json.dumps(events[0]) if events else "{}")
 PY
 }
 
 get_first_seller_wallet() {
   local raw
-  raw="$(curl -sS "${BACKEND_BASE_URL}/marketplace/tools" || true)"
+  raw="$(curl -sS "${BACKEND_BASE_URL}/marketplace/agents" || true)"
   python3 - "$raw" <<'PY'
 import json,sys
 raw = sys.argv[1].strip() if len(sys.argv) > 1 else ""
@@ -118,11 +129,11 @@ try:
 except Exception:
     print("")
     raise SystemExit
-tools = data.get("tools", [])
-if not tools:
+agents = data.get("agents", [])
+if not agents:
     print("")
     raise SystemExit
-seller = tools[0].get("seller", {})
+seller = agents[0].get("seller", {})
 print(str(seller.get("walletAddress", "")))
 PY
 }
@@ -131,7 +142,7 @@ LATEST_EVENT="$(get_latest_event_json)"
 LATEST_TX_HASH="$(python3 - "$LATEST_EVENT" <<'PY'
 import json,sys
 event=json.loads(sys.argv[1]) if len(sys.argv)>1 and sys.argv[1] else {}
-print(str(event.get("details",{}).get("transaction","") or event.get("details",{}).get("transactionRef","")))
+print(str(event.get("onchainTxHash","") or event.get("transactionRef","") or event.get("details",{}).get("onchainTxHash","") or event.get("details",{}).get("transaction","") or event.get("details",{}).get("transactionRef","")))
 PY
 )"
 
@@ -151,7 +162,7 @@ if [[ -z "$BUYER_WALLET_ADDRESS" && -n "$LATEST_BUYER_ADDRESS" ]]; then
 fi
 
 if [[ -z "$SELLER_WALLET_ADDRESS" ]]; then
-  SELLER_WALLET_ADDRESS="$ALPHA_SELLER_WALLET_ADDRESS"
+  SELLER_WALLET_ADDRESS="$(get_first_seller_wallet)"
 fi
 
 open_url() {

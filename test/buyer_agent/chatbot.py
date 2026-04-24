@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()
 
 RUN_MODE = os.getenv("RUN_MODE", "chat").strip().lower()
 BUYER_PROMPT = os.getenv("BUYER_PROMPT", "Add 18 and 24").strip()
@@ -27,6 +27,8 @@ BUYER_MODEL = os.getenv("BUYER_MODEL", "gpt-4o-mini").strip()
 PAYMENT_MODE = os.getenv("PAYMENT_MODE", "simulate").strip().lower()
 X402_CHAIN = os.getenv("X402_CHAIN", "arcTestnet").strip()
 X402_PRIVATE_KEY = os.getenv("X402_PRIVATE_KEY", "").strip()
+BUYER_ID = os.getenv("BUYER_ID", "").strip()
+BUYER_NAME = os.getenv("BUYER_NAME", "Test Buyer").strip()
 
 
 def _parse_decimal(value: str, fallback: str) -> Decimal:
@@ -103,6 +105,33 @@ async def discover_services(timeout_seconds: float, default_price: Decimal) -> l
 
 
 async def buy_service(invoke_url: str, prompt: str, timeout_seconds: float) -> dict[str, Any]:
+    if PAYMENT_MODE == "onchain":
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            buyer_id = BUYER_ID
+            if not buyer_id.isdigit():
+                base = invoke_url.split("/sellers/")[0].rstrip("/")
+                create_buyer = await client.post(
+                    f"{base}/buyers",
+                    json={
+                        "name": BUYER_NAME,
+                        "organization": "Agents Market",
+                        "description": "Buyer agent for on-chain marketplace tests",
+                        "walletAddress": "",
+                    },
+                )
+                create_buyer.raise_for_status()
+                buyer_id = str(create_buyer.json()["buyer"]["id"])
+
+            response = await client.post(invoke_url, json={"prompt": prompt, "buyerId": int(buyer_id)})
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "paymentMode": "onchain",
+                "transactionRef": str(payload.get("payment", {}).get("onchainTxHash", "")),
+                "amountUSDC": str(payload.get("payment", {}).get("amountUSDC", "")),
+                "responseData": payload,
+            }
+
     if PAYMENT_MODE == "x402":
         if not X402_PRIVATE_KEY:
             raise RuntimeError("X402_PRIVATE_KEY is required when PAYMENT_MODE=x402.")

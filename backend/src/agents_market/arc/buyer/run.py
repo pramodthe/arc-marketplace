@@ -9,23 +9,13 @@ import httpx
 from agents_market._env import load_backend_env
 
 load_backend_env()
-
-try:
-    from circlekit import GatewayClient
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency 'circlekit'. Install editable circle-titanoboa-sdk "
-        "(see backend/README.md)."
-    ) from exc
-
-
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:4021").rstrip("/")
 LOOP_SECONDS = float(os.getenv("BUYER_LOOP_SECONDS", "0"))
 BUYER_PROMPT = os.getenv("BUYER_PROMPT", "Give me a short crypto market update.")
 BUYER_TASK = os.getenv("BUYER_TASK", "auto").strip().lower()
 BUYER_BUDGET_USDC = os.getenv("BUYER_BUDGET_USDC", "999").strip()
 BUYER_ID = os.getenv("BUYER_ID", "").strip()
+BUYER_NAME = os.getenv("BUYER_NAME", "Marketplace Buyer").strip()
 
 
 def _parse_budget() -> Decimal:
@@ -92,12 +82,26 @@ def pick_tool(desired_id: str, budget: Decimal, tools: list[dict]) -> tuple[dict
     return None, "insufficient_budget_for_any_tool"
 
 
+async def _ensure_buyer_id(http: httpx.AsyncClient) -> int:
+    if BUYER_ID.isdigit():
+        return int(BUYER_ID)
+    response = await http.post(
+        f"{SERVER_URL}/buyers",
+        json={
+            "name": BUYER_NAME,
+            "organization": "Agents Market",
+            "description": "Autonomous buyer for on-chain marketplace tests",
+            "walletAddress": "",
+        },
+    )
+    response.raise_for_status()
+    return int(response.json()["buyer"]["id"])
+
+
 async def run_once(prompt: str, budget: Decimal) -> tuple[Decimal, str]:
-    if not PRIVATE_KEY:
-        print("Error: PRIVATE_KEY is required in .env")
-        sys.exit(1)
 
     async with httpx.AsyncClient(timeout=10) as http:
+        buyer_id = await _ensure_buyer_id(http)
         discover_payload = {
             "prompt": prompt,
             "budgetUSDC": float(budget),
@@ -121,32 +125,39 @@ async def run_once(prompt: str, budget: Decimal) -> tuple[Decimal, str]:
         print(f"[buyer] skip: {reason} (budget={budget})")
         return Decimal("0"), reason
 
-    async with GatewayClient(chain="arcTestnet", private_key=PRIVATE_KEY) as gateway:
-        if tool.get("invokeUrl"):
-            url = str(tool["invokeUrl"])
-        else:
-            invoke_path = f"/sellers/{tool['seller']['id']}/agents/{tool['agent']['id']}/tools/{tool['toolId']}/invoke"
-            url = f"{SERVER_URL}{invoke_path}"
-        print(
-            f"[buyer] {reason} | source={tool.get('source','internal')} "
-            f"| tool={tool['toolKey']} | price=${Decimal(str(tool['priceUSDC'])):.2f} | url={url}"
-        )
+    if tool.get("invokeUrl"):
+        url = str(tool["invokeUrl"])
+    else:
+        invoke_path = f"/sellers/{tool['seller']['id']}/agents/{tool['agent']['id']}/tools/{tool['toolId']}/invoke"
+        url = f"{SERVER_URL}{invoke_path}"
+    selected_skills = [skill["skillKey"] for skill in (tool.get("skills") or [])[:1]]
+    print(
+        f"[buyer] {reason} | source={tool.get('source','internal')} "
+        f"| tool={tool['toolKey']} | start_price=${Decimal(str(tool['priceUSDC'])):.4f} | url={url}"
+    )
 
-        body = {"prompt": prompt}
-        if BUYER_ID.isdigit():
-            body["buyerId"] = int(BUYER_ID)
-        result = await gateway.pay(url, method="POST", body=body)
-        spent = Decimal(str(result.formatted_amount))
-        output_text = result.data.get("outputText", "") if isinstance(result.data, dict) else ""
-
-        print(
-            f"[{datetime.now(timezone.utc).isoformat()}] paid {result.formatted_amount} USDC "
-            f"tx={result.transaction}"
+    async with httpx.AsyncClient(timeout=30) as http:
+        response = await http.post(
+            url,
+            json={
+                "prompt": prompt,
+                "buyerId": buyer_id,
+                "selectedSkills": selected_skills,
+            },
         )
-        print(f"Prompt: {prompt}")
-        print(f"AI output: {str(output_text)[:220]}")
-        print("-" * 60)
-        return spent, "ok"
+        response.raise_for_status()
+        result = response.json()
+    spent = Decimal(str(result["payment"]["amountUSDC"]))
+    output_text = result.get("outputText", "")
+
+    print(
+        f"[{datetime.now(timezone.utc).isoformat()}] paid {result['payment']['amountUSDC']} USDC "
+        f"tx={result['payment']['onchainTxHash']}"
+    )
+    print(f"Prompt: {prompt}")
+    print(f"AI output: {str(output_text)[:220]}")
+    print("-" * 60)
+    return spent, "ok"
 
 
 async def main() -> None:

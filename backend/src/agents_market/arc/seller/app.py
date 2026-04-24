@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import html
 import os
+import re
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+from json import JSONDecodeError
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +31,13 @@ from agents_market.arc.services.erc8004 import (
     record_reputation as arc_record_reputation,
     submit_validation_response as arc_submit_validation_response,
 )
+from agents_market.arc.services.payments import (
+    ARC_TESTNET_USDC,
+    derive_wallet_id_by_address,
+    get_wallet_balances,
+    transfer_usdc_from_private_key,
+    transfer_usdc,
+)
 from agents_market.db import Base, engine, get_db
 from agents_market.marketplace.models import PaymentEvent, ReputationEvent
 from agents_market.marketplace.repository import (
@@ -36,6 +47,7 @@ from agents_market.marketplace.repository import (
     create_bridge_transfer,
     create_payment_event,
     create_reputation_event,
+    create_usage_records,
     create_seller,
     create_validation_request,
     get_agent,
@@ -46,12 +58,15 @@ from agents_market.marketplace.repository import (
     list_agents,
     list_buyer_invocations,
     list_buyers,
+    list_agents_for_marketplace,
     list_payment_events,
+    list_skills_for_tool,
     list_sellers,
     list_tools_for_marketplace,
     payment_summary,
     set_validation_response,
     update_agent_tool_prices,
+    update_tool_pricing,
     upsert_gateway_account,
 )
 
@@ -71,29 +86,57 @@ from circle.web3 import developer_controlled_wallets, utils
 class SellerCreateBody(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = ""
-    ownerWalletAddress: str
+    ownerWalletAddress: str = ""
     validatorWalletAddress: str = ""
 
 
 class AgentCreateBody(BaseModel):
     name: str = Field(min_length=2, max_length=120)
-    description: str = ""
+    description: str = Field(min_length=1)
+    category: str = Field(min_length=1, max_length=80, default="General")
+    endpointUrl: str = ""
+    httpMethod: str = "POST"
+    priceUSDC: float = Field(gt=0, le=0.01, default=0.01)
+    apiDocsUrl: str = ""
     metadataUri: str = ""
     iconDataUrl: str = ""
-    basePriceUSDC: float | None = Field(default=None, gt=0)
+    capabilities: list["AgentCapabilityBody"] = Field(default_factory=list)
+
+
+class CapabilitySkillBody(BaseModel):
+    skillKey: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    priceUSDC: float = Field(ge=0, le=0.01, default=0)
+
+
+class AgentCapabilityBody(BaseModel):
+    toolKey: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    category: str = Field(min_length=1, max_length=80, default="General")
+    endpointUrl: str = Field(min_length=8, max_length=500)
+    httpMethod: str = "POST"
+    priceUSDC: float = Field(gt=0, le=0.01)
+    runtimePriceUSDC: float = Field(ge=0, le=0.01, default=0)
+    runtimeUnit: str = Field(default="none")
+    capabilityType: str = Field(default="tool")
+    skills: list[CapabilitySkillBody] = Field(default_factory=list)
 
 
 class BuyerCreateBody(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     organization: str = ""
     description: str = ""
-    walletAddress: str
+    walletAddress: str = ""
     validatorWalletAddress: str = ""
 
 
 class InvokeBody(BaseModel):
     prompt: str = "Give me a short Arc ecosystem update."
     buyerId: int | None = None
+    selectedSkills: list[str] = Field(default_factory=list)
+    usageUnits: float | None = Field(default=None, ge=0)
 
 
 class DiscoverBody(BaseModel):
@@ -129,6 +172,12 @@ class GatewayDepositBody(BaseModel):
     amount: str = "1"
 
 
+DEMO_TREASURY_MODE = "shared_demo_treasury"
+DEMO_TREASURY_CHAIN = "arcTestnet"
+ONCHAIN_TX_HASH_RE = re.compile(r"^(?:0x)?[a-fA-F0-9]{64}$")
+ARCSCAN_TX_URL = "https://testnet.arcscan.app/tx/"
+
+
 class WalletProvisionBody(BaseModel):
     walletSetName: str | None = None
 
@@ -141,11 +190,217 @@ class BridgeTransferBody(BaseModel):
 
 
 class AgentPricingUpdateBody(BaseModel):
-    basePriceUSDC: float = Field(gt=0)
+    basePriceUSDC: float = Field(gt=0, le=0.01)
+
+
+class ToolPricingUpdateBody(BaseModel):
+    toolPriceUSDC: float | None = Field(default=None, gt=0, le=0.01)
+    runtimePriceUSDC: float | None = Field(default=None, ge=0, le=0.01)
+    skillPrices: list[dict[str, Any]] = Field(default_factory=list)
+
+
+AgentCreateBody.model_rebuild()
 
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_http_method(method: str) -> str:
+    normalized = method.strip().upper()
+    if normalized not in {"GET", "POST"}:
+        raise HTTPException(status_code=400, detail="Only GET and POST provider endpoints are supported")
+    return normalized
+
+
+def _validate_http_url(value: str, *, field_name: str) -> str:
+    text = value.strip()
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be an absolute http(s) URL")
+    return text
+
+
+def _require_circle_arc_env() -> None:
+    missing = [name for name in ("CIRCLE_API_KEY", "CIRCLE_ENTITY_SECRET") if not os.getenv(name)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(missing)} required for automatic Arc ERC-8004 registration",
+        )
+
+
+def _shared_demo_treasury_private_key() -> str:
+    private_key = os.getenv("SELLER_PRIVATE_KEY")
+    if not private_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "SELLER_PRIVATE_KEY is required for shared demo Gateway treasury operations. "
+                "It is not a per-seller key."
+            ),
+        )
+    return private_key
+
+
+def _demo_treasury_gateway_payload(
+    *,
+    account: Any | None = None,
+    seller: Any | None = None,
+    treasury_wallet_address: str,
+    wallet_balance_usdc: float,
+    gateway_available_usdc: float,
+    deposit_tx_hash: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "mode": DEMO_TREASURY_MODE,
+        "chain": DEMO_TREASURY_CHAIN,
+        "treasuryWalletAddress": treasury_wallet_address,
+        "walletAddress": treasury_wallet_address,
+        "walletBalanceUSDC": wallet_balance_usdc,
+        "gatewayAvailableUSDC": gateway_available_usdc,
+        "lastSyncedAt": account.last_synced_at.isoformat() if account is not None else _utc_iso(),
+    }
+    if seller is not None:
+        payload["sellerId"] = seller.id
+        payload["sellerRecipientAddress"] = seller.owner_wallet_address
+    if deposit_tx_hash is not None:
+        payload["depositTxHash"] = deposit_tx_hash
+    return payload
+
+
+def _create_seller_wallets(seller: Any, *, wallet_set_name: str | None = None) -> dict[str, Any]:
+    _require_circle_arc_env()
+    api_key = os.getenv("CIRCLE_API_KEY")
+    entity_secret = os.getenv("CIRCLE_ENTITY_SECRET")
+    circle_client = utils.init_developer_controlled_wallets_client(api_key=api_key, entity_secret=entity_secret)
+    wallet_sets_api = developer_controlled_wallets.WalletSetsApi(circle_client)
+    wallets_api = developer_controlled_wallets.WalletsApi(circle_client)
+
+    wallet_set = wallet_sets_api.create_wallet_set(
+        developer_controlled_wallets.CreateWalletSetRequest.from_dict(
+            {"name": wallet_set_name or f"seller-{seller.id}-wallet-set"}
+        )
+    )
+    wallet_set_id = wallet_set.data.wallet_set.actual_instance.id
+
+    wallets = wallets_api.create_wallet(
+        developer_controlled_wallets.CreateWalletRequest.from_dict(
+            {
+                "blockchains": ["ARC-TESTNET"],
+                "count": 2,
+                "walletSetId": wallet_set_id,
+                "accountType": "SCA",
+            }
+        )
+    ).data.wallets
+
+    owner = wallets[0].actual_instance
+    validator = wallets[1].actual_instance
+    seller.wallet_set_id = wallet_set_id
+    seller.owner_wallet_id = owner.id
+    seller.validator_wallet_id = validator.id
+    seller.owner_wallet_address = owner.address
+    seller.validator_wallet_address = validator.address
+    return {
+        "walletSetId": wallet_set_id,
+        "ownerWallet": {"id": owner.id, "address": owner.address},
+        "validatorWallet": {"id": validator.id, "address": validator.address},
+    }
+
+
+def _create_buyer_wallets(buyer: Any, *, wallet_set_name: str | None = None) -> dict[str, Any]:
+    _require_circle_arc_env()
+    api_key = os.getenv("CIRCLE_API_KEY")
+    entity_secret = os.getenv("CIRCLE_ENTITY_SECRET")
+    circle_client = utils.init_developer_controlled_wallets_client(api_key=api_key, entity_secret=entity_secret)
+    wallet_sets_api = developer_controlled_wallets.WalletSetsApi(circle_client)
+    wallets_api = developer_controlled_wallets.WalletsApi(circle_client)
+
+    wallet_set = wallet_sets_api.create_wallet_set(
+        developer_controlled_wallets.CreateWalletSetRequest.from_dict(
+            {"name": wallet_set_name or f"buyer-{buyer.id}-wallet-set"}
+        )
+    )
+    wallet_set_id = wallet_set.data.wallet_set.actual_instance.id
+    wallets = wallets_api.create_wallet(
+        developer_controlled_wallets.CreateWalletRequest.from_dict(
+            {
+                "blockchains": ["ARC-TESTNET"],
+                "count": 2,
+                "walletSetId": wallet_set_id,
+                "accountType": "SCA",
+            }
+        )
+    ).data.wallets
+
+    owner = wallets[0].actual_instance
+    validator = wallets[1].actual_instance
+    buyer.owner_wallet_id = owner.id
+    buyer.validator_wallet_id = validator.id
+    buyer.wallet_address = owner.address
+    buyer.validator_wallet_address = validator.address
+    return {
+        "walletSetId": wallet_set_id,
+        "ownerWallet": {"id": owner.id, "address": owner.address},
+        "validatorWallet": {"id": validator.id, "address": validator.address},
+    }
+
+
+def _ensure_seller_arc_wallets(seller: Any, db: Session) -> None:
+    if seller.owner_wallet_id and seller.validator_wallet_id:
+        return
+    _create_seller_wallets(seller)
+    db.commit()
+    db.refresh(seller)
+
+
+def _ensure_buyer_arc_wallets(buyer: Any, db: Session) -> None:
+    if buyer.owner_wallet_id and buyer.validator_wallet_id and buyer.wallet_address:
+        return
+    if buyer.wallet_address and not buyer.owner_wallet_id:
+        try:
+            derived_wallet_id = derive_wallet_id_by_address(buyer.wallet_address)
+        except Exception:
+            derived_wallet_id = None
+        if derived_wallet_id:
+            buyer.owner_wallet_id = derived_wallet_id
+            db.commit()
+            db.refresh(buyer)
+        return
+    _create_buyer_wallets(buyer)
+    db.commit()
+    db.refresh(buyer)
+
+
+def _wallet_balances_payload(*, wallet_id: str | None, wallet_address: str) -> dict[str, Any]:
+    balances = get_wallet_balances(wallet_address, wallet_id=wallet_id)
+    return {
+        "walletId": wallet_id,
+        "walletAddress": wallet_address,
+        "usdcTokenAddress": ARC_TESTNET_USDC,
+        "usdc": balances.get("usdc"),
+        "tokens": balances.get("tokens", []),
+        "network": "arcTestnet",
+    }
+
+
+def _lookup_private_key_for_address(address: str) -> str | None:
+    normalized = address.lower()
+    explicit_pairs = [
+        (os.getenv("CLIENT_ADDRESS", ""), os.getenv("CLIENT_PRIVATE_KEY", "")),
+        (os.getenv("SELLER_ADDRESS", ""), os.getenv("SELLER_PRIVATE_KEY", "")),
+    ]
+    for wallet_address, private_key in explicit_pairs:
+        if wallet_address and wallet_address.lower() == normalized and private_key:
+            return private_key
+
+    for index in range(1, 20):
+        wallet_address = os.getenv(f"AI_AGENT_{index}_ADDRESS", "")
+        private_key = os.getenv(f"AI_AGENT_{index}_PRIVATE_KEY", "")
+        if wallet_address and wallet_address.lower() == normalized and private_key:
+            return private_key
+    return None
 
 
 def _seller_api_payload(seller: Any) -> dict[str, Any]:
@@ -172,6 +427,14 @@ def _agent_api_payload(agent: Any) -> dict[str, Any]:
         "description": agent.description,
         "metadataUri": agent.metadata_uri,
         "iconDataUrl": agent.icon_data_url,
+        "category": agent.category,
+        "endpointUrl": agent.endpoint_url,
+        "httpMethod": agent.http_method,
+        "apiDocsUrl": agent.api_docs_url,
+        "healthStatus": agent.health_status,
+        "lastHealthCheckAt": agent.last_health_check_at.isoformat()
+        if agent.last_health_check_at is not None
+        else None,
         "arcAgentId": agent.arc_agent_id,
         "identityTxHash": agent.identity_tx_hash,
         "status": agent.status,
@@ -199,17 +462,151 @@ def _buyer_api_payload(buyer: Any) -> dict[str, Any]:
 
 
 def _tool_price_string(price_usdc: float) -> str:
-    return f"${Decimal(str(price_usdc)):.2f}"
+    amount = Decimal(str(price_usdc)).quantize(Decimal("0.000001")).normalize()
+    return f"${amount:f}"
 
 
-def _tool_system_instruction(tool_key: str) -> str:
-    instructions = {
-        "summarize": "You are a concise summarizer. Reply in under 120 words.",
-        "analyze": "Provide deeper analysis with concise trade-offs and risks.",
-        "plan": "Produce a crisp 3-step execution plan with milestones.",
-        "response": "Give a practical direct answer with short rationale.",
+def _tool_api_payload(tool: Any, db: Session, *, fallback_agent: Any | None = None) -> dict[str, Any]:
+    endpoint_url = tool.endpoint_url or (fallback_agent.endpoint_url if fallback_agent is not None else "")
+    http_method = tool.http_method or (fallback_agent.http_method if fallback_agent is not None else "POST")
+    return {
+        "toolId": tool.id,
+        "toolKey": tool.tool_key,
+        "slug": tool.slug,
+        "name": tool.name,
+        "description": tool.description,
+        "priceUSDC": tool.price_usdc,
+        "runtimePriceUSDC": tool.runtime_price_usdc,
+        "runtimeUnit": tool.runtime_unit,
+        "capabilityType": tool.capability_type,
+        "category": tool.category,
+        "endpointUrl": endpoint_url,
+        "httpMethod": http_method,
+        "skills": [
+            {
+                "skillId": skill.id,
+                "skillKey": skill.skill_key,
+                "name": skill.name,
+                "description": skill.description,
+                "priceUSDC": skill.price_usdc,
+            }
+            for skill in list_skills_for_tool(db, tool.id)
+        ],
     }
-    return instructions.get(tool_key, "Give a concise helpful response.")
+
+
+def _normalize_runtime_unit(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"none", "per_request"}:
+        raise HTTPException(status_code=400, detail="runtimeUnit must be 'none' or 'per_request'")
+    return normalized
+
+
+def _build_capabilities_payload(body: AgentCreateBody) -> list[dict[str, Any]]:
+    capabilities = body.capabilities or []
+    if capabilities:
+        payloads = []
+        for capability in capabilities:
+            payloads.append(
+                {
+                    "toolKey": capability.toolKey.strip(),
+                    "name": capability.name.strip(),
+                    "description": capability.description.strip(),
+                    "category": capability.category.strip(),
+                    "endpointUrl": _validate_http_url(capability.endpointUrl, field_name="capabilities.endpointUrl"),
+                    "httpMethod": _normalize_http_method(capability.httpMethod),
+                    "priceUSDC": capability.priceUSDC,
+                    "runtimePriceUSDC": capability.runtimePriceUSDC,
+                    "runtimeUnit": _normalize_runtime_unit(capability.runtimeUnit),
+                    "capabilityType": capability.capabilityType.strip() or "tool",
+                    "skills": [
+                        {
+                            "skillKey": skill.skillKey.strip(),
+                            "name": skill.name.strip(),
+                            "description": skill.description.strip(),
+                            "priceUSDC": skill.priceUSDC,
+                        }
+                        for skill in capability.skills
+                    ],
+                }
+            )
+        return payloads
+
+    return [
+        {
+            "toolKey": "invoke",
+            "name": body.name.strip(),
+            "description": body.description.strip(),
+            "category": body.category.strip(),
+            "endpointUrl": _validate_http_url(body.endpointUrl, field_name="endpointUrl"),
+            "httpMethod": _normalize_http_method(body.httpMethod),
+            "priceUSDC": body.priceUSDC,
+            "runtimePriceUSDC": 0,
+            "runtimeUnit": "none",
+            "capabilityType": "tool",
+            "skills": [],
+        }
+    ]
+
+
+def _pricing_breakdown(tool: Any, selected_skill_keys: list[str], *, db: Session) -> tuple[Decimal, list[dict[str, Any]], list[Any]]:
+    components: list[dict[str, Any]] = []
+    total = Decimal("0")
+
+    tool_price = Decimal(str(tool.price_usdc))
+    components.append(
+        {
+            "componentType": "tool",
+            "componentKey": tool.tool_key,
+            "componentName": tool.name,
+            "units": 1,
+            "unitPriceUSDC": float(tool_price),
+            "subtotalUSDC": float(tool_price),
+            "skillId": None,
+        }
+    )
+    total += tool_price
+
+    matched_skills = []
+    selected = {item.strip().lower() for item in selected_skill_keys if item.strip()}
+    for skill in list_skills_for_tool(db, tool.id):
+        if skill.skill_key.lower() not in selected:
+            continue
+        price = Decimal(str(skill.price_usdc))
+        matched_skills.append(skill)
+        components.append(
+            {
+                "componentType": "skill",
+                "componentKey": skill.skill_key,
+                "componentName": skill.name,
+                "units": 1,
+                "unitPriceUSDC": float(price),
+                "subtotalUSDC": float(price),
+                "skillId": skill.id,
+            }
+        )
+        total += price
+
+    runtime_price = Decimal(str(tool.runtime_price_usdc))
+    if tool.runtime_unit == "per_request" and runtime_price > 0:
+        components.append(
+            {
+                "componentType": "runtime",
+                "componentKey": "per_request",
+                "componentName": "Agent runtime",
+                "units": 1,
+                "unitPriceUSDC": float(runtime_price),
+                "subtotalUSDC": float(runtime_price),
+                "skillId": None,
+            }
+        )
+        total += runtime_price
+
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="Capability total must be greater than zero")
+    if total > Decimal("0.01"):
+        raise HTTPException(status_code=400, detail="Total charge must be at or below 0.01 USDC")
+    return total, components, matched_skills
 
 
 def _tokenize(text: str) -> set[str]:
@@ -384,39 +781,72 @@ async def _fetch_external_candidates() -> list[dict[str, Any]]:
     return candidates
 
 
-def _generate_llm_text(prompt: str, system_instruction: str) -> dict[str, str]:
-    api_key = os.getenv("LLM_API_KEY")
-    api_base = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    if not api_key:
-        return {
-            "text": (
-                f"[Mock {system_instruction[:40]}...] Prompt: {prompt}\n"
-                "No LLM key configured - deterministic demo output."
-            ),
-            "provider": "mock",
-            "model": "mock-model",
-        }
-    with httpx.Client(timeout=20) as client:
-        response = client.post(
-            f"{api_base.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
+async def _forward_to_provider(
+    agent: Any,
+    tool: Any,
+    body: InvokeBody,
+    *,
+    buyer_id: int | None,
+    billing_breakdown: list[dict[str, Any]],
+) -> dict[str, Any]:
+    endpoint_url = tool.endpoint_url or agent.endpoint_url
+    payload = {
+        "prompt": body.prompt,
+        "buyerId": buyer_id,
+        "selectedSkills": body.selectedSkills,
+        "usageUnits": body.usageUnits,
+        "billing": billing_breakdown,
+        "marketplace": {
+            "agentId": agent.id,
+            "toolId": tool.id,
+            "toolKey": tool.tool_key,
+            "arcAgentId": agent.arc_agent_id,
+            "network": "arcTestnet",
+        },
+    }
+    method = _normalize_http_method(tool.http_method or agent.http_method)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            if method == "GET":
+                provider_response = await client.get(
+                    endpoint_url,
+                    params={"prompt": body.prompt, "selectedSkills": ",".join(body.selectedSkills)},
+                )
+            else:
+                provider_response = await client.request(method, endpoint_url, json=payload)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Provider endpoint request failed: {exc}") from exc
+
+    content_type = provider_response.headers.get("content-type", "")
+    try:
+        data: Any = provider_response.json() if "application/json" in content_type else provider_response.text
+    except JSONDecodeError:
+        data = provider_response.text
+
+    if provider_response.status_code >= 400:
+        preview = data if isinstance(data, str) else str(data)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Provider endpoint returned an error",
+                "providerStatus": provider_response.status_code,
+                "providerPreview": preview[:500],
             },
         )
-        response.raise_for_status()
-        data = response.json()
-        return {
-            "text": data["choices"][0]["message"]["content"],
-            "provider": "openai-compatible",
-            "model": model,
-        }
+
+    if isinstance(data, str):
+        output_text = data
+    elif isinstance(data, dict):
+        output_text = data.get("outputText") or data.get("result") or str(data)
+    else:
+        output_text = str(data)
+    return {
+        "statusCode": provider_response.status_code,
+        "contentType": content_type,
+        "data": data,
+        "outputText": str(output_text),
+        "endpointUrl": endpoint_url,
+    }
 
 
 async def _ensure_gateway_middleware(app: FastAPI, seller_address: str):
@@ -498,6 +928,120 @@ async def _process_payment(
     return response
 
 
+def _payment_required_response(
+    *,
+    db: Session,
+    seller: Any,
+    agent: Any,
+    tool: Any,
+    invoke_path: str,
+    buyer_id: int | None,
+    total_amount_usdc: Decimal,
+    billing_breakdown: list[dict[str, Any]],
+) -> JSONResponse:
+    create_payment_event(
+        db,
+        seller_id=seller.id,
+        agent_id=agent.id,
+        tool_id=tool.id,
+        event_type="payment",
+        status="payment_required",
+        buyer_address=None,
+        transaction_ref=None,
+        amount_usdc=0,
+        details={
+            "path": invoke_path,
+            "price": f"{total_amount_usdc:.6f}",
+            "sellerId": seller.id,
+            "agentId": agent.id,
+            "toolId": tool.id,
+            "buyerId": buyer_id,
+            "billingBreakdown": billing_breakdown,
+            "message": "buyerId is required for custodial on-chain settlement",
+        },
+    )
+    return JSONResponse(
+        status_code=402,
+        content={
+            "message": "Payment required",
+            "required": {
+                "buyerId": "Provide a registered buyerId so the platform can settle USDC on Arc.",
+                "totalUSDC": f"{total_amount_usdc:.6f}",
+                "billingBreakdown": billing_breakdown,
+            },
+            "x402": {
+                "supported": True,
+                "note": "x402 is retained for compatibility, but Arc on-chain settlement is the source of truth.",
+            },
+        },
+    )
+
+
+def _settle_onchain_payment(
+    db: Session,
+    *,
+    seller: Any,
+    buyer: Any,
+    agent: Any,
+    tool: Any,
+    invoke_path: str,
+    total_amount_usdc: Decimal,
+    billing_breakdown: list[dict[str, Any]],
+) -> tuple[PaymentEvent, dict[str, Any]]:
+    if buyer.owner_wallet_id:
+        payment = transfer_usdc(
+            wallet_id=buyer.owner_wallet_id,
+            wallet_address=buyer.wallet_address,
+            destination_address=seller.owner_wallet_address,
+            amount_usdc=total_amount_usdc,
+            ref_id=f"agent-{agent.id}-tool-{tool.id}",
+        )
+    else:
+        private_key = _lookup_private_key_for_address(buyer.wallet_address)
+        if not private_key:
+            raise RuntimeError(
+                "Buyer wallet is not Circle-managed and no matching local private key is configured for direct settlement."
+            )
+        payment = transfer_usdc_from_private_key(
+            private_key=private_key,
+            source_wallet_address=buyer.wallet_address,
+            destination_address=seller.owner_wallet_address,
+            amount_usdc=total_amount_usdc,
+            ref_id=f"agent-{agent.id}-tool-{tool.id}",
+        )
+    event = create_payment_event(
+        db,
+        seller_id=seller.id,
+        agent_id=agent.id,
+        tool_id=tool.id,
+        event_type="payment",
+        status="paid",
+        buyer_address=buyer.wallet_address,
+        transaction_ref=payment.tx_hash,
+        amount_usdc=float(total_amount_usdc),
+        details={
+            "path": invoke_path,
+            "payer": buyer.wallet_address,
+            "payee": seller.owner_wallet_address,
+            "amountUSDC": f"{total_amount_usdc:.6f}",
+            "onchainTxHash": payment.tx_hash,
+            "circleTransactionId": payment.tx_id,
+            "billingBreakdown": billing_breakdown,
+            "sellerId": seller.id,
+            "agentId": agent.id,
+            "toolId": tool.id,
+            "buyerId": buyer.id,
+        },
+    )
+    return event, {
+        "amountUSDC": f"{total_amount_usdc:.6f}",
+        "onchainTxHash": payment.tx_hash,
+        "circleTransactionId": payment.tx_id,
+        "payer": buyer.wallet_address,
+        "payee": seller.owner_wallet_address,
+    }
+
+
 def _buyer_breakdown(events: list[PaymentEvent]) -> list[dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"buyerAddress": "", "paymentsCount": 0, "totalAmountUSDC": Decimal("0"), "lastTransaction": None}
@@ -509,8 +1053,12 @@ def _buyer_breakdown(events: list[PaymentEvent]) -> list[dict[str, Any]]:
         entry["buyerAddress"] = event.buyer_address
         entry["paymentsCount"] += 1
         entry["totalAmountUSDC"] += Decimal(str(event.amount_usdc))
-        if event.transaction_ref:
-            entry["lastTransaction"] = event.transaction_ref
+        if entry["lastTransaction"] is None:
+            onchain_tx_hash = _event_onchain_tx_hash(event)
+            if onchain_tx_hash:
+                entry["lastTransaction"] = onchain_tx_hash
+            elif event.transaction_ref:
+                entry["lastTransaction"] = event.transaction_ref
     result = []
     for row in stats.values():
         result.append(
@@ -523,6 +1071,174 @@ def _buyer_breakdown(events: list[PaymentEvent]) -> list[dict[str, Any]]:
         )
     result.sort(key=lambda item: item["paymentsCount"], reverse=True)
     return result
+
+
+def _classify_transaction_ref(transaction_ref: str | None) -> dict[str, str | None]:
+    normalized = (transaction_ref or "").strip()
+    if not normalized:
+        return {
+            "referenceType": "none",
+            "gatewayReference": None,
+            "onchainTxHash": None,
+        }
+    if ONCHAIN_TX_HASH_RE.fullmatch(normalized):
+        if not normalized.startswith("0x"):
+            normalized = f"0x{normalized.lower()}"
+        return {
+            "referenceType": "onchain",
+            "gatewayReference": None,
+            "onchainTxHash": normalized,
+        }
+    return {
+        "referenceType": "gateway_reference",
+        "gatewayReference": normalized,
+        "onchainTxHash": None,
+    }
+
+
+def _event_onchain_tx_hash(event: PaymentEvent) -> str | None:
+    details = event.details if isinstance(event.details, dict) else {}
+    candidate = details.get("onchainTxHash") if isinstance(details, dict) else None
+    if isinstance(candidate, str) and ONCHAIN_TX_HASH_RE.fullmatch(candidate.strip()):
+        normalized = candidate.strip()
+        return normalized if normalized.startswith("0x") else f"0x{normalized.lower()}"
+    if event.transaction_ref and ONCHAIN_TX_HASH_RE.fullmatch(event.transaction_ref.strip()):
+        normalized = event.transaction_ref.strip()
+        return normalized if normalized.startswith("0x") else f"0x{normalized.lower()}"
+    return None
+
+
+def _serialize_payment_event(event: PaymentEvent) -> dict[str, Any]:
+    details = event.details if isinstance(event.details, dict) else {}
+    explicit_onchain_tx_hash = _event_onchain_tx_hash(event)
+    ref_info = (
+        {
+            "referenceType": "onchain",
+            "gatewayReference": None,
+            "onchainTxHash": explicit_onchain_tx_hash,
+        }
+        if explicit_onchain_tx_hash
+        else _classify_transaction_ref(event.transaction_ref)
+    )
+    return {
+        "timestamp": event.created_at.isoformat(),
+        "eventType": event.event_type,
+        "status": event.status,
+        "transactionRef": event.transaction_ref,
+        "referenceType": ref_info["referenceType"],
+        "gatewayReference": ref_info["gatewayReference"],
+        "onchainTxHash": ref_info["onchainTxHash"],
+        "details": details,
+    }
+
+
+def _transactions_html(payload: dict[str, Any]) -> str:
+    event_rows = []
+    for event in payload["events"]:
+        details = html.escape(str(event["details"]))
+        reference = event["gatewayReference"] or event["onchainTxHash"] or ""
+        reference_html = html.escape(str(reference))
+        if event["referenceType"] == "onchain" and event["onchainTxHash"]:
+            reference_html = (
+                f'<a href="{html.escape(ARCSCAN_TX_URL + str(event["onchainTxHash"]))}" '
+                'target="_blank" rel="noreferrer">'
+                f"{reference_html}</a>"
+            )
+        event_rows.append(
+            "<tr>"
+            f"<td>{html.escape(event['timestamp'])}</td>"
+            f"<td>{html.escape(event['eventType'])}</td>"
+            f"<td>{html.escape(event['status'])}</td>"
+            f"<td>{html.escape(str(event['referenceType']))}</td>"
+            f"<td>{reference_html}</td>"
+            f"<td><pre>{details}</pre></td>"
+            "</tr>"
+        )
+    buyer_rows = []
+    for buyer in payload["buyers"]:
+        buyer_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(buyer['buyerAddress']))}</td>"
+            f"<td>{html.escape(str(buyer['paymentsCount']))}</td>"
+            f"<td>{html.escape(str(buyer['totalAmountUSDC']))}</td>"
+            f"<td>{html.escape(str(buyer['lastTransaction'] or ''))}</td>"
+            "</tr>"
+        )
+
+    summary = payload["summary"]
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arc Marketplace Transactions</title>
+    <style>
+      body {{ background: #0b0b0c; color: #e4e4e7; font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; }}
+      main {{ max-width: 1200px; margin: 0 auto; padding: 32px 20px 48px; }}
+      h1, h2 {{ margin: 0 0 16px; }}
+      p, li {{ color: #a1a1aa; }}
+      a {{ color: #60a5fa; text-decoration: none; }}
+      a:hover {{ text-decoration: underline; }}
+      .grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin: 20px 0 28px; }}
+      .metric {{ border: 1px solid #27272a; border-radius: 12px; padding: 14px; background: #111113; }}
+      .metric .label {{ font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #71717a; }}
+      .metric .value {{ margin-top: 8px; font-size: 24px; font-weight: 600; color: #fafafa; }}
+      .panel {{ border: 1px solid #27272a; border-radius: 14px; background: #111113; overflow: hidden; margin-top: 18px; }}
+      table {{ width: 100%; border-collapse: collapse; }}
+      th, td {{ padding: 12px 14px; text-align: left; vertical-align: top; border-top: 1px solid #27272a; font-size: 13px; }}
+      th {{ color: #a1a1aa; background: #0f0f10; font-weight: 600; border-top: none; }}
+      pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; color: #d4d4d8; }}
+      code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+      .note {{ border-left: 3px solid #3b82f6; padding-left: 12px; margin: 16px 0 0; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Arc Marketplace Transactions</h1>
+      <p>This page shows live payment events from the local backend. Values marked <code>onchain</code> are real Arc transaction hashes and link to Arcscan.</p>
+      <div class="grid">
+        <div class="metric"><div class="label">Events</div><div class="value">{summary['total']}</div></div>
+        <div class="metric"><div class="label">Paid</div><div class="value">{summary['paid']}</div></div>
+        <div class="metric"><div class="label">Payment Required</div><div class="value">{summary['paymentRequired']}</div></div>
+        <div class="metric"><div class="label">Total Paid USDC</div><div class="value">{summary['totalPaidAmountUSDC']}</div></div>
+        <div class="metric"><div class="label">Unique Buyers</div><div class="value">{summary['uniqueBuyers']}</div></div>
+      </div>
+      <p class="note">Legacy rows may still show <code>gateway_reference</code> from the older x402-only flow. New on-chain settlement rows are labeled <code>onchain</code> and carry the actual transfer hash.</p>
+      <section class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Event</th>
+              <th>Status</th>
+              <th>Reference Type</th>
+              <th>Reference</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(event_rows) if event_rows else '<tr><td colspan="6">No events recorded.</td></tr>'}
+          </tbody>
+        </table>
+      </section>
+      <section class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>Buyer</th>
+              <th>Payments</th>
+              <th>Total Paid USDC</th>
+              <th>Last Reference</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(buyer_rows) if buyer_rows else '<tr><td colspan="4">No buyers recorded.</td></tr>'}
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>"""
 
 
 @asynccontextmanager
@@ -552,8 +1268,8 @@ async def root():
     return {
         "ok": True,
         "service": "arc-marketplace",
-        "mode": "mock-open",
-        "message": "Multi-seller Arc marketplace with x402 paid invocation.",
+        "mode": "provider-proxy",
+        "message": "Arc marketplace with ERC-8004 registered provider APIs and x402 paid invocation.",
     }
 
 
@@ -577,6 +1293,8 @@ async def create_buyer_endpoint(body: BuyerCreateBody, db: Session = Depends(get
         wallet_address=body.walletAddress,
         validator_wallet_address=body.validatorWalletAddress,
     )
+    if not body.walletAddress.strip():
+        _ensure_buyer_arc_wallets(buyer, db)
     return {"buyer": _buyer_api_payload(buyer)}
 
 
@@ -593,6 +1311,7 @@ async def get_buyer_endpoint(buyer_id: int, db: Session = Depends(get_db)):
     invocations = list_buyer_invocations(db, buyer_id=buyer_id, limit=50)
     return {
         "buyer": _buyer_api_payload(buyer),
+        "balances": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
         "invocations": [
             {
                 "id": i.id,
@@ -600,7 +1319,7 @@ async def get_buyer_endpoint(buyer_id: int, db: Session = Depends(get_db)):
                 "agentId": i.agent_id,
                 "toolId": i.tool_id,
                 "amountUSDC": i.amount_usdc,
-                "transactionRef": i.transaction_ref,
+                "onchainTxHash": i.transaction_ref,
                 "status": i.status,
                 "createdAt": i.created_at.isoformat(),
             }
@@ -614,6 +1333,7 @@ async def arc_register_buyer(buyer_id: int, body: RegisterBody, db: Session = De
     buyer = get_buyer(db, buyer_id)
     if buyer is None:
         raise HTTPException(status_code=404, detail="Buyer not found")
+    _ensure_buyer_arc_wallets(buyer, db)
     registration = register_agent_identity(
         metadata_uri=body.metadataUri,
         owner_wallet_id=buyer.owner_wallet_id,
@@ -629,6 +1349,15 @@ async def arc_register_buyer(buyer_id: int, body: RegisterBody, db: Session = De
     db.commit()
     db.refresh(buyer)
     return {"buyer": _buyer_api_payload(buyer), "arc": {"txHash": registration.tx_hash, "agentId": registration.agent_id}}
+
+
+@app.get("/buyers/{buyer_id}/balances")
+async def buyer_balances(buyer_id: int, db: Session = Depends(get_db)):
+    buyer = get_buyer(db, buyer_id)
+    if buyer is None:
+        raise HTTPException(status_code=404, detail="Buyer not found")
+    _ensure_buyer_arc_wallets(buyer, db)
+    return {"balances": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address)}
 
 
 @app.post("/sellers")
@@ -654,7 +1383,17 @@ async def get_seller_endpoint(seller_id: int, db: Session = Depends(get_db)):
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
     agents = list_agents(db, seller_id=seller_id)
-    return {"seller": _seller_api_payload(seller), "agents": [_agent_api_payload(a) for a in agents]}
+    return {
+        "seller": _seller_api_payload(seller),
+        "balances": _wallet_balances_payload(wallet_id=seller.owner_wallet_id, wallet_address=seller.owner_wallet_address),
+        "agents": [
+            {
+                **_agent_api_payload(a),
+                "tools": [_tool_api_payload(tool, db, fallback_agent=a) for tool in a.tools],
+            }
+            for a in agents
+        ],
+    }
 
 
 @app.post("/sellers/{seller_id}/agents")
@@ -662,6 +1401,24 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
+    capabilities = _build_capabilities_payload(body)
+    endpoint_url = capabilities[0]["endpointUrl"]
+    api_docs_url = _validate_http_url(body.apiDocsUrl, field_name="apiDocsUrl") if body.apiDocsUrl.strip() else ""
+    http_method = capabilities[0]["httpMethod"]
+    _ensure_seller_arc_wallets(seller, db)
+    try:
+        registration = register_agent_identity(
+            metadata_uri=body.metadataUri or endpoint_url,
+            owner_wallet_id=seller.owner_wallet_id,
+            validator_wallet_id=seller.validator_wallet_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Arc ERC-8004 registration failed: {exc}") from exc
+
+    seller.owner_wallet_id = registration.owner_wallet_id
+    seller.validator_wallet_id = registration.validator_wallet_id
+    seller.owner_wallet_address = registration.owner_wallet_address
+    seller.validator_wallet_address = registration.validator_wallet_address
     agent = create_agent(
         db,
         seller_id=seller_id,
@@ -669,9 +1426,27 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         description=body.description,
         metadata_uri=body.metadataUri,
         icon_data_url=body.iconDataUrl,
-        base_price_usdc=body.basePriceUSDC,
+        category=body.category.strip(),
+        endpoint_url=endpoint_url,
+        http_method=http_method,
+        api_docs_url=api_docs_url,
+        price_usdc=body.priceUSDC,
+        capabilities=capabilities,
     )
-    return {"agent": _agent_api_payload(agent)}
+    agent.arc_agent_id = registration.agent_id
+    agent.identity_tx_hash = registration.tx_hash
+    agent.status = "registered"
+    db.commit()
+    db.refresh(agent)
+    db.refresh(seller)
+    return {
+        "agent": {
+            **_agent_api_payload(agent),
+            "tools": [_tool_api_payload(tool, db, fallback_agent=agent) for tool in agent.tools],
+        },
+        "seller": _seller_api_payload(seller),
+        "arc": {"txHash": registration.tx_hash, "agentId": registration.agent_id},
+    }
 
 
 @app.patch("/sellers/{seller_id}/agents/{agent_id}/pricing")
@@ -705,9 +1480,46 @@ async def update_agent_pricing_endpoint(
     }
 
 
+@app.patch("/sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/pricing")
+async def update_tool_pricing_endpoint(
+    seller_id: int,
+    agent_id: int,
+    tool_id: int,
+    body: ToolPricingUpdateBody,
+    db: Session = Depends(get_db),
+):
+    tool = update_tool_pricing(
+        db,
+        seller_id=seller_id,
+        agent_id=agent_id,
+        tool_id=tool_id,
+        tool_price_usdc=body.toolPriceUSDC,
+        runtime_price_usdc=body.runtimePriceUSDC,
+        skill_prices=body.skillPrices,
+    )
+    if tool is None:
+        raise HTTPException(status_code=404, detail="Tool not found for agent")
+    agent = get_agent(db, agent_id)
+    return {"tool": _tool_api_payload(tool, db, fallback_agent=agent)}
+
+
+@app.get("/sellers/{seller_id}/balances")
+async def seller_balances(seller_id: int, db: Session = Depends(get_db)):
+    seller = get_seller(db, seller_id)
+    if seller is None:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    _ensure_seller_arc_wallets(seller, db)
+    return {"balances": _wallet_balances_payload(wallet_id=seller.owner_wallet_id, wallet_address=seller.owner_wallet_address)}
+
+
 @app.get("/marketplace/tools")
 async def marketplace_tools(db: Session = Depends(get_db)):
     return {"tools": list_tools_for_marketplace(db)}
+
+
+@app.get("/marketplace/agents")
+async def marketplace_agents(db: Session = Depends(get_db)):
+    return {"agents": list_agents_for_marketplace(db)}
 
 
 @app.post("/marketplace/discover")
@@ -766,23 +1578,44 @@ async def agent_card(db: Session = Depends(get_db)):
                 "id": f"tool-{tool['toolId']}",
                 "name": tool["name"],
                 "description": tool["description"],
-                "tags": [tool["toolKey"], "x402", "arc", "marketplace", tool["seller"]["name"]],
+                "tags": [
+                    tool["toolKey"],
+                    tool.get("category", tool["agent"].get("category", "General")),
+                    "arc-usdc",
+                    "arc-testnet",
+                    "marketplace",
+                    tool["seller"]["name"],
+                ],
                 "examples": [f"Use {tool['name']} for: summarize trading strategy risks."],
                 "inputModes": ["application/json"],
                 "outputModes": ["application/json"],
                 "x402PriceUSDC": tool["priceUSDC"],
+                "x402Network": "arcTestnet",
+                "category": tool.get("category", tool["agent"].get("category", "General")),
+                "providerEndpointHost": (
+                    urlparse(tool.get("endpointUrl", tool["agent"].get("endpointUrl", ""))).netloc
+                    if tool.get("endpointUrl", tool["agent"].get("endpointUrl"))
+                    else ""
+                ),
+                "billableSkills": tool.get("skills", []),
+                "runtimePriceUSDC": tool.get("runtimePriceUSDC", 0),
+                "arcAgentId": tool["agent"].get("arcAgentId"),
+                "metadataUri": tool["agent"].get("metadataUri", ""),
                 "path": f"/sellers/{tool['seller']['id']}/agents/{tool['agent']['id']}/tools/{tool['toolId']}/invoke",
             }
         )
     return {
         "name": "Arc Marketplace Agent",
-        "description": "Multi-seller Arc x402 marketplace for autonomous agent service discovery and invocation.",
+        "description": "Multi-seller Arc marketplace for autonomous agent service discovery and real on-chain USDC invocation settlement.",
         "url": _public_base_url(),
         "provider": {"organization": "Agents Market", "url": _public_base_url()},
         "version": "0.1.0",
         "documentationUrl": f"{_public_base_url()}/docs",
         "capabilities": {"streaming": False, "stateHistory": True},
-        "authentication": {"type": "x402-or-bearer", "instructions": "Use x402 Payment-Signature for paid invoke routes."},
+        "authentication": {
+            "type": "buyer-id-or-x402",
+            "instructions": "Preferred: send buyerId for custodial on-chain settlement. x402 headers remain compatibility-only.",
+        },
         "skills": skills,
     }
 
@@ -855,25 +1688,87 @@ async def invoke_tool(
             buyer_id = int(buyer_id_header)
         except ValueError:
             raise HTTPException(status_code=400, detail="X-Buyer-Id must be an integer") from None
+    buyer = None
     if buyer_id is not None:
         buyer = get_buyer(db, buyer_id)
         if buyer is None:
             raise HTTPException(status_code=404, detail="Buyer not found")
+        _ensure_buyer_arc_wallets(buyer, db)
 
     invoke_path = f"/sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke"
-    paid = await _process_payment(
-        request,
-        db,
-        seller=seller,
-        agent=agent,
-        tool=tool,
-        invoke_path=invoke_path,
-        buyer_id=buyer_id,
+    total_amount_usdc, billing_breakdown, matched_skills = _pricing_breakdown(
+        tool,
+        body.selectedSkills,
+        db=db,
     )
-    if isinstance(paid, JSONResponse):
-        return paid
+    if buyer is None:
+        payment_header = request.headers.get("Payment-Signature")
+        if payment_header:
+            paid = await _process_payment(
+                request,
+                db,
+                seller=seller,
+                agent=agent,
+                tool=tool,
+                invoke_path=invoke_path,
+                buyer_id=buyer_id,
+            )
+            if isinstance(paid, JSONResponse):
+                return paid
+            raise HTTPException(
+                status_code=400,
+                detail="x402-only invokes are no longer the settlement source of truth; provide buyerId for on-chain settlement",
+            )
+        return _payment_required_response(
+            db=db,
+            seller=seller,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            buyer_id=buyer_id,
+            total_amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+        )
 
-    llm_result = _generate_llm_text(body.prompt, _tool_system_instruction(tool.tool_key))
+    try:
+        payment_event, settled_payment = _settle_onchain_payment(
+            db,
+            seller=seller,
+            buyer=buyer,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            total_amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+        )
+    except Exception as exc:
+        create_payment_event(
+            db,
+            seller_id=seller.id,
+            agent_id=agent.id,
+            tool_id=tool.id,
+            event_type="payment",
+            status="failed",
+            buyer_address=buyer.wallet_address,
+            transaction_ref=None,
+            amount_usdc=float(total_amount_usdc),
+            details={
+                "path": invoke_path,
+                "amountUSDC": f"{total_amount_usdc:.6f}",
+                "buyerId": buyer.id,
+                "error": str(exc),
+                "billingBreakdown": billing_breakdown,
+            },
+        )
+        raise HTTPException(status_code=402, detail=f"On-chain payment failed: {exc}") from exc
+
+    provider_result = await _forward_to_provider(
+        agent,
+        tool,
+        body,
+        buyer_id=buyer_id,
+        billing_breakdown=billing_breakdown,
+    )
     create_payment_event(
         db,
         seller_id=seller.id,
@@ -881,33 +1776,41 @@ async def invoke_tool(
         tool_id=tool.id,
         event_type="seller_output",
         status="completed",
-        buyer_address=paid.payer,
-        transaction_ref=paid.transaction,
+        buyer_address=buyer.wallet_address,
+        transaction_ref=settled_payment["onchainTxHash"],
         amount_usdc=0,
         details={
             "path": invoke_path,
             "promptPreview": body.prompt[:120],
-            "responsePreview": llm_result["text"][:160],
-            "provider": llm_result["provider"],
-            "model": llm_result["model"],
-            "transaction": paid.transaction,
+            "responsePreview": provider_result["outputText"][:160],
+            "providerEndpointHost": urlparse(provider_result["endpointUrl"]).netloc,
+            "providerStatusCode": provider_result["statusCode"],
+            "onchainTxHash": settled_payment["onchainTxHash"],
+            "billingBreakdown": billing_breakdown,
+            "selectedSkills": [skill.skill_key for skill in matched_skills],
             "buyerId": buyer_id,
         },
     )
-    if buyer_id is not None:
-        create_buyer_invocation(
-            db,
-            buyer_id=buyer_id,
-            seller_id=seller.id,
-            agent_id=agent.id,
-            tool_id=tool.id,
-            payment_event_id=None,
-            prompt=body.prompt,
-            output_preview=llm_result["text"][:300],
-            amount_usdc=float(Decimal(str(paid.amount)) / Decimal("1000000")),
-            transaction_ref=paid.transaction,
-            status="completed",
-        )
+    invocation = create_buyer_invocation(
+        db,
+        buyer_id=buyer.id,
+        seller_id=seller.id,
+        agent_id=agent.id,
+        tool_id=tool.id,
+        payment_event_id=payment_event.id,
+        prompt=body.prompt,
+        output_preview=provider_result["outputText"][:300],
+        amount_usdc=float(total_amount_usdc),
+        transaction_ref=settled_payment["onchainTxHash"],
+        status="completed",
+    )
+    create_usage_records(
+        db,
+        buyer_invocation_id=invocation.id,
+        payment_event_id=payment_event.id,
+        tool_id=tool.id,
+        usage_components=billing_breakdown,
+    )
 
     response_body = {
         "sellerId": seller.id,
@@ -915,37 +1818,54 @@ async def invoke_tool(
         "toolId": tool.id,
         "toolKey": tool.tool_key,
         "prompt": body.prompt,
-        "outputText": llm_result["text"],
+        "outputText": provider_result["outputText"],
+        "providerResponse": provider_result["data"],
         "payment": {
-            "amountBaseUnits": str(paid.amount),
-            "amountUSDC": f"{(Decimal(str(paid.amount)) / Decimal('1000000')):.6f}",
-            "payer": paid.payer,
-            "transaction": paid.transaction,
+            "amountUSDC": settled_payment["amountUSDC"],
+            "payer": settled_payment["payer"],
+            "payee": settled_payment["payee"],
+            "onchainTxHash": settled_payment["onchainTxHash"],
+            "circleTransactionId": settled_payment["circleTransactionId"],
+            "billingBreakdown": billing_breakdown,
         },
-        "llm": {"provider": llm_result["provider"], "model": llm_result["model"]},
+        "provider": {
+            "endpointHost": urlparse(provider_result["endpointUrl"]).netloc,
+            "statusCode": provider_result["statusCode"],
+            "contentType": provider_result["contentType"],
+        },
+        "balances": {
+            "buyer": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
+            "seller": _wallet_balances_payload(
+                wallet_id=seller.owner_wallet_id,
+                wallet_address=seller.owner_wallet_address,
+            ),
+        },
     }
-    response = JSONResponse(content=response_body)
-    for header_name, header_value in paid.response_headers.items():
-        response.headers[header_name] = header_value
-    return response
+    return JSONResponse(content=response_body)
 
 
 @app.get("/transactions")
-async def transactions(db: Session = Depends(get_db)):
+async def transactions(request: Request, db: Session = Depends(get_db)):
     events = list_payment_events(db)
-    return {
-        "events": [
-            {
-                "timestamp": e.created_at.isoformat(),
-                "eventType": e.event_type,
-                "status": e.status,
-                "details": e.details,
-            }
-            for e in events
-        ],
+    payload = {
+        "events": [_serialize_payment_event(e) for e in events],
         "summary": payment_summary(db),
         "buyers": _buyer_breakdown(events),
     }
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and "application/json" not in accept:
+        return HTMLResponse(_transactions_html(payload))
+    return payload
+
+
+@app.get("/transactions/view", response_class=HTMLResponse)
+async def transactions_view(db: Session = Depends(get_db)):
+    payload = {
+        "events": [_serialize_payment_event(e) for e in list_payment_events(db)],
+        "summary": payment_summary(db),
+        "buyers": _buyer_breakdown(list_payment_events(db)),
+    }
+    return HTMLResponse(_transactions_html(payload))
 
 
 @app.post("/agents/{agent_id}/arc/register")
@@ -1102,29 +2022,28 @@ async def gateway_deposit(seller_id: int, body: GatewayDepositBody, db: Session 
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
-    private_key = os.getenv("SELLER_PRIVATE_KEY")
-    if not private_key:
-        raise HTTPException(status_code=400, detail="SELLER_PRIVATE_KEY is required in .env")
+    private_key = _shared_demo_treasury_private_key()
 
-    async with GatewayClient(chain="arcTestnet", private_key=private_key) as gateway:
+    async with GatewayClient(chain=DEMO_TREASURY_CHAIN, private_key=private_key) as gateway:
         result = await gateway.deposit(body.amount)
         balances = await gateway.get_balances()
         account = upsert_gateway_account(
             db,
             seller_id=seller.id,
-            chain="arcTestnet",
+            chain=DEMO_TREASURY_CHAIN,
             wallet_address=gateway.address,
             wallet_balance_usdc=float(balances.wallet.formatted),
             gateway_available_usdc=float(balances.gateway.formatted_available),
         )
     return {
-        "gateway": {
-            "sellerId": seller.id,
-            "depositTxHash": result.deposit_tx_hash,
-            "walletAddress": account.wallet_address,
-            "walletBalanceUSDC": account.wallet_balance_usdc,
-            "gatewayAvailableUSDC": account.gateway_available_usdc,
-        }
+        "gateway": _demo_treasury_gateway_payload(
+            account=account,
+            seller=seller,
+            treasury_wallet_address=account.wallet_address,
+            wallet_balance_usdc=account.wallet_balance_usdc,
+            gateway_available_usdc=account.gateway_available_usdc,
+            deposit_tx_hash=result.deposit_tx_hash,
+        )
     }
 
 
@@ -1138,48 +2057,15 @@ async def provision_circle_wallets(
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
 
-    api_key = os.getenv("CIRCLE_API_KEY")
-    entity_secret = os.getenv("CIRCLE_ENTITY_SECRET")
-    if not api_key or not entity_secret:
-        raise HTTPException(status_code=400, detail="CIRCLE_API_KEY and CIRCLE_ENTITY_SECRET are required")
-
-    circle_client = utils.init_developer_controlled_wallets_client(api_key=api_key, entity_secret=entity_secret)
-    wallet_sets_api = developer_controlled_wallets.WalletSetsApi(circle_client)
-    wallets_api = developer_controlled_wallets.WalletsApi(circle_client)
-
-    wallet_set = wallet_sets_api.create_wallet_set(
-        developer_controlled_wallets.CreateWalletSetRequest.from_dict(
-            {"name": body.walletSetName or f"seller-{seller.id}-wallet-set"}
-        )
-    )
-    wallet_set_id = wallet_set.data.wallet_set.actual_instance.id
-
-    wallets = wallets_api.create_wallet(
-        developer_controlled_wallets.CreateWalletRequest.from_dict(
-            {
-                "blockchains": ["ARC-TESTNET"],
-                "count": 2,
-                "walletSetId": wallet_set_id,
-                "accountType": "SCA",
-            }
-        )
-    ).data.wallets
-
-    owner = wallets[0].actual_instance
-    validator = wallets[1].actual_instance
-    seller.wallet_set_id = wallet_set_id
-    seller.owner_wallet_id = owner.id
-    seller.validator_wallet_id = validator.id
-    seller.owner_wallet_address = owner.address
-    seller.validator_wallet_address = validator.address
+    wallets_payload = _create_seller_wallets(seller, wallet_set_name=body.walletSetName)
     db.commit()
     db.refresh(seller)
     return {
         "seller": _seller_api_payload(seller),
         "wallets": {
-            "walletSetId": wallet_set_id,
-            "ownerWallet": {"id": owner.id, "address": owner.address},
-            "validatorWallet": {"id": validator.id, "address": validator.address},
+            "custodyModel": "circle_developer_controlled_shared_account",
+            "note": "Created under the platform Circle developer account for this hackathon demo.",
+            **wallets_payload,
         },
     }
 
@@ -1189,30 +2075,41 @@ async def gateway_balances(seller_id: int, db: Session = Depends(get_db)):
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
-    private_key = os.getenv("SELLER_PRIVATE_KEY")
-    if not private_key:
-        raise HTTPException(status_code=400, detail="SELLER_PRIVATE_KEY is required in .env")
+    private_key = _shared_demo_treasury_private_key()
 
-    async with GatewayClient(chain="arcTestnet", private_key=private_key) as gateway:
+    async with GatewayClient(chain=DEMO_TREASURY_CHAIN, private_key=private_key) as gateway:
         balances = await gateway.get_balances()
         account = upsert_gateway_account(
             db,
             seller_id=seller.id,
-            chain="arcTestnet",
+            chain=DEMO_TREASURY_CHAIN,
             wallet_address=gateway.address,
             wallet_balance_usdc=float(balances.wallet.formatted),
             gateway_available_usdc=float(balances.gateway.formatted_available),
         )
     return {
-        "gateway": {
-            "sellerId": seller.id,
-            "chain": account.chain,
-            "walletAddress": account.wallet_address,
-            "walletBalanceUSDC": account.wallet_balance_usdc,
-            "gatewayAvailableUSDC": account.gateway_available_usdc,
-            "lastSyncedAt": account.last_synced_at.isoformat(),
-        }
+        "gateway": _demo_treasury_gateway_payload(
+            account=account,
+            seller=seller,
+            treasury_wallet_address=account.wallet_address,
+            wallet_balance_usdc=account.wallet_balance_usdc,
+            gateway_available_usdc=account.gateway_available_usdc,
+        )
     }
+
+
+@app.get("/gateway/demo-treasury/balances")
+async def demo_treasury_balances():
+    private_key = _shared_demo_treasury_private_key()
+    async with GatewayClient(chain=DEMO_TREASURY_CHAIN, private_key=private_key) as gateway:
+        balances = await gateway.get_balances()
+        return {
+            "gateway": _demo_treasury_gateway_payload(
+                treasury_wallet_address=gateway.address,
+                wallet_balance_usdc=float(balances.wallet.formatted),
+                gateway_available_usdc=float(balances.gateway.formatted_available),
+            )
+        }
 
 
 @app.post("/sellers/{seller_id}/bridge/transfers")

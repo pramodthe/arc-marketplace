@@ -6,7 +6,7 @@ Multi-seller Arc marketplace backend for hackathon demos:
 - Seller/agent/tool persistence with SQLAlchemy + Alembic
 - x402 nanopayment execution using Circle Gateway (`circlekit`)
 - Arc ERC-8004 identity/reputation/validation service endpoints
-- Gateway and Bridge Kit workflow endpoints (bridge orchestration stub + records)
+- Gateway demo treasury and Bridge Kit workflow endpoints (bridge orchestration stub + records)
 
 ## Project layout
 
@@ -95,7 +95,7 @@ curl -sX POST http://localhost:4021/sellers \
   }'
 ```
 
-2) Create an agent under that seller:
+2) Create a provider agent under that seller. This requires Circle/Arc env vars and automatically registers the agent through Arc ERC-8004 before the listing is active:
 
 ```bash
 curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
@@ -103,35 +103,40 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
   -d '{
     "name": "Arb Scout v1",
     "description": "Cross-chain opportunity analysis and execution plans",
+    "category": "Analytics",
+    "endpointUrl": "https://your-agent-domain/api/invoke",
+    "httpMethod": "POST",
+    "priceUSDC": 0.01,
+    "apiDocsUrl": "https://your-agent-domain/docs",
     "metadataUri": "https://your-agent-domain/.well-known/agent-card.json"
   }'
 ```
 
-3) Register the agent on Arc ERC-8004:
+3) Verify listing visibility:
 
 ```bash
-curl -sX POST http://localhost:4021/agents/<AGENT_ID>/arc/register \
-  -H "Content-Type: application/json" \
-  -d '{}'
+curl -s http://localhost:4021/marketplace/agents
 ```
 
-4) Verify listing visibility:
-
-```bash
-curl -s http://localhost:4021/marketplace/tools
-```
-
-5) Buyers discover and pay to invoke:
+4) Buyers discover and pay to invoke:
 
 - Discovery: `POST /marketplace/discover`
 - Paid invoke: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
 - Ledger: `GET /transactions`
 
 Notes:
-- Default tools are seeded per agent (`summarize`, `analyze`, `plan`, `response`).
-- If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`.
+- Each MVP provider listing creates one paid `invoke` tool backed by the developer's endpoint URL.
+- If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`. All demo wallets are created under the same Circle developer account.
 - For external interoperability, publish your own `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
 - The backend `GET /.well-known/agent-card.json` is currently a marketplace-level aggregated compatibility document.
+
+## Hackathon payment model
+
+- One Circle developer account (`CIRCLE_API_KEY` + `CIRCLE_ENTITY_SECRET`) provisions all demo seller, buyer, owner, and validator wallets.
+- Arc identity registration uses two `ARC-TESTNET` SCA wallets per registered agent or buyer: owner and validator.
+- x402 paid invokes use each seller's `ownerWalletAddress` as the Gateway payment recipient.
+- Gateway deposit and balance routes use `SELLER_PRIVATE_KEY` as a shared local demo treasury key. Seller-scoped Gateway endpoints return seller context plus `mode: "shared_demo_treasury"`.
+- This is acceptable for hackathon demos, but production custody should replace the shared key with seller-specific treasury/accounting controls.
 
 ## Buyer onboarding flow (register consumer agent)
 
@@ -171,6 +176,7 @@ curl -sX POST http://localhost:4021/buyers/<BUYER_ID>/arc/register \
 - `GET /buyers`
 - `GET /buyers/{buyer_id}`
 - `POST /buyers/{buyer_id}/arc/register`
+- `GET /marketplace/agents`
 - `GET /marketplace/tools`
 - `POST /marketplace/discover` (autonomous ranked discovery by prompt+budget)
 - `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (x402 paid)
@@ -192,8 +198,9 @@ Arc lifecycle:
 Wallet/treasury:
 
 - `POST /sellers/{seller_id}/wallets/provision` (Circle developer-controlled wallets)
-- `POST /sellers/{seller_id}/gateway/deposit`
-- `GET /sellers/{seller_id}/gateway/balances`
+- `POST /sellers/{seller_id}/gateway/deposit` (seller-context view over shared demo treasury)
+- `GET /sellers/{seller_id}/gateway/balances` (seller-context view over shared demo treasury)
+- `GET /gateway/demo-treasury/balances`
 - `POST /sellers/{seller_id}/bridge/transfers`
 
 ## CLI commands

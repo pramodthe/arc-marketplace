@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import desc, func, select
@@ -16,41 +17,36 @@ from agents_market.marketplace.models import (
     PaymentEvent,
     ReputationEvent,
     Seller,
+    Skill,
     Tool,
+    UsageRecord,
     ValidationRequest,
 )
 
 
-DEFAULT_TOOLS: list[dict[str, Any]] = [
-    {
-        "tool_key": "summarize",
-        "name": "Summarize",
-        "slug": "summarize",
-        "description": "Short summary of the prompt",
-        "price_usdc": 0.01,
-    },
-    {
-        "tool_key": "analyze",
-        "name": "Analyze",
-        "slug": "analyze",
-        "description": "Deeper analysis and trade-offs",
-        "price_usdc": 0.03,
-    },
-    {
-        "tool_key": "plan",
-        "name": "Plan",
-        "slug": "plan",
-        "description": "Structured plan output",
-        "price_usdc": 0.05,
-    },
-    {
-        "tool_key": "response",
-        "name": "Response",
-        "slug": "response",
-        "description": "Generic response generation",
-        "price_usdc": 0.01,
-    },
-]
+DEFAULT_TOOL_KEY = "invoke"
+DEFAULT_RUNTIME_UNIT = "none"
+
+
+def _slugify(value: str, *, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or fallback
+
+
+def _tool_skill_payload(db: Session, tool_id: int) -> list[dict[str, Any]]:
+    rows = list(
+        db.scalars(select(Skill).where(Skill.tool_id == tool_id, Skill.enabled.is_(True)).order_by(Skill.created_at))
+    )
+    return [
+        {
+            "skillId": row.id,
+            "skillKey": row.skill_key,
+            "name": row.name,
+            "description": row.description,
+            "priceUSDC": row.price_usdc,
+        }
+        for row in rows
+    ]
 
 
 def list_sellers(db: Session) -> list[Seller]:
@@ -66,8 +62,8 @@ def create_seller(
     *,
     name: str,
     description: str,
-    owner_wallet_address: str,
-    validator_wallet_address: str,
+    owner_wallet_address: str = "",
+    validator_wallet_address: str = "",
     wallet_set_id: str | None = None,
     owner_wallet_id: str | None = None,
     validator_wallet_id: str | None = None,
@@ -136,7 +132,12 @@ def create_agent(
     description: str,
     metadata_uri: str,
     icon_data_url: str,
-    base_price_usdc: float | None = None,
+    category: str,
+    endpoint_url: str,
+    http_method: str,
+    api_docs_url: str,
+    price_usdc: float,
+    capabilities: list[dict[str, Any]] | None = None,
 ) -> Agent:
     agent = Agent(
         seller_id=seller_id,
@@ -144,31 +145,61 @@ def create_agent(
         description=description,
         metadata_uri=metadata_uri,
         icon_data_url=icon_data_url,
-        status="created",
+        category=category,
+        endpoint_url=endpoint_url,
+        http_method=http_method,
+        api_docs_url=api_docs_url,
+        health_status="unchecked",
+        status="registering",
     )
     db.add(agent)
     db.flush()
 
-    normalized_base_price = None
-    if base_price_usdc is not None:
-        normalized_base_price = max(float(base_price_usdc), 0.000001)
+    capability_rows = capabilities or [
+        {
+            "toolKey": DEFAULT_TOOL_KEY,
+            "name": name,
+            "description": description,
+            "priceUSDC": float(price_usdc),
+            "endpointUrl": endpoint_url,
+            "httpMethod": http_method,
+            "category": category,
+            "runtimePriceUSDC": 0,
+            "runtimeUnit": DEFAULT_RUNTIME_UNIT,
+            "capabilityType": "tool",
+            "skills": [],
+        }
+    ]
 
-    for default_tool in DEFAULT_TOOLS:
-        tool_price = (
-            normalized_base_price
-            if normalized_base_price is not None
-            else float(default_tool["price_usdc"])
+    for index, capability in enumerate(capability_rows):
+        tool = Tool(
+            agent_id=agent.id,
+            tool_key=str(capability.get("toolKey") or capability.get("name") or f"tool-{index + 1}"),
+            name=str(capability.get("name") or name),
+            slug=_slugify(str(capability.get("slug") or capability.get("name") or f"tool-{index + 1}"), fallback=f"tool-{index + 1}"),
+            description=str(capability.get("description") or description),
+            price_usdc=float(capability.get("priceUSDC", price_usdc)),
+            endpoint_url=str(capability.get("endpointUrl") or endpoint_url),
+            http_method=str(capability.get("httpMethod") or http_method),
+            category=str(capability.get("category") or category),
+            runtime_price_usdc=float(capability.get("runtimePriceUSDC", 0)),
+            runtime_unit=str(capability.get("runtimeUnit") or DEFAULT_RUNTIME_UNIT),
+            capability_type=str(capability.get("capabilityType") or "tool"),
+            config=capability.get("config") or {},
         )
-        db.add(
-            Tool(
-                agent_id=agent.id,
-                tool_key=default_tool["tool_key"],
-                name=default_tool["name"],
-                slug=default_tool["slug"],
-                description=default_tool["description"],
-                price_usdc=tool_price,
+        db.add(tool)
+        db.flush()
+        for skill in capability.get("skills", []) or []:
+            db.add(
+                Skill(
+                    tool_id=tool.id,
+                    skill_key=str(skill.get("skillKey") or skill.get("name") or f"skill-{tool.id}"),
+                    name=str(skill.get("name") or "Unnamed Skill"),
+                    description=str(skill.get("description") or ""),
+                    price_usdc=float(skill.get("priceUSDC", 0)),
+                    enabled=bool(skill.get("enabled", True)),
+                )
             )
-        )
     db.commit()
     db.refresh(agent)
     return agent
@@ -179,12 +210,18 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
         select(Tool, Agent, Seller)
         .join(Agent, Tool.agent_id == Agent.id)
         .join(Seller, Agent.seller_id == Seller.id)
-        .where(Tool.enabled.is_(True), Seller.status == "active")
+        .where(
+            Tool.enabled.is_(True),
+            Tool.price_usdc <= 0.01,
+            Agent.status == "registered",
+            Seller.status == "active",
+        )
         .order_by(desc(Tool.updated_at))
     ).all()
 
     result: list[dict[str, Any]] = []
     for tool, agent, seller in rows:
+        starting_price = float(tool.price_usdc) + float(tool.runtime_price_usdc)
         result.append(
             {
                 "toolId": tool.id,
@@ -192,17 +229,125 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "slug": tool.slug,
                 "name": tool.name,
                 "description": tool.description,
-                "priceUSDC": tool.price_usdc,
+                "priceUSDC": starting_price,
+                "runtimePriceUSDC": tool.runtime_price_usdc,
+                "runtimeUnit": tool.runtime_unit,
+                "capabilityType": tool.capability_type,
+                "category": tool.category,
+                "endpointUrl": tool.endpoint_url or agent.endpoint_url,
+                "httpMethod": tool.http_method or agent.http_method,
+                "skills": _tool_skill_payload(db, tool.id),
+                "invokeUrl": f"/sellers/{seller.id}/agents/{agent.id}/tools/{tool.id}/invoke",
                 "seller": {"id": seller.id, "name": seller.name, "walletAddress": seller.owner_wallet_address},
                 "agent": {
                     "id": agent.id,
                     "name": agent.name,
+                    "description": agent.description,
+                    "metadataUri": agent.metadata_uri,
                     "arcAgentId": agent.arc_agent_id,
+                    "identityTxHash": agent.identity_tx_hash,
                     "iconDataUrl": agent.icon_data_url,
+                    "category": agent.category,
+                    "endpointUrl": agent.endpoint_url,
+                    "httpMethod": agent.http_method,
+                    "apiDocsUrl": agent.api_docs_url,
+                    "healthStatus": agent.health_status,
+                    "lastHealthCheckAt": agent.last_health_check_at.isoformat()
+                    if agent.last_health_check_at is not None
+                    else None,
+                    "status": agent.status,
                 },
             }
         )
     return result
+
+
+def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(Agent, Seller)
+        .join(Seller, Agent.seller_id == Seller.id)
+        .where(Agent.status == "registered", Seller.status == "active")
+        .order_by(desc(Agent.updated_at))
+    ).all()
+
+    cards: list[dict[str, Any]] = []
+    for agent, seller in rows:
+        tools = list(
+            db.scalars(
+                select(Tool).where(Tool.agent_id == agent.id, Tool.enabled.is_(True), Tool.price_usdc <= 0.01)
+            )
+        )
+        prices = [float(tool.price_usdc) + float(tool.runtime_price_usdc) for tool in tools]
+        min_price = min(prices) if prices else 0
+        tool_payloads = [
+            {
+                "toolId": tool.id,
+                "toolKey": tool.tool_key,
+                "slug": tool.slug,
+                "name": tool.name,
+                "description": tool.description,
+                "priceUSDC": float(tool.price_usdc) + float(tool.runtime_price_usdc),
+                "runtimePriceUSDC": tool.runtime_price_usdc,
+                "runtimeUnit": tool.runtime_unit,
+                "capabilityType": tool.capability_type,
+                "category": tool.category,
+                "endpointUrl": tool.endpoint_url or agent.endpoint_url,
+                "httpMethod": tool.http_method or agent.http_method,
+                "skills": _tool_skill_payload(db, tool.id),
+                "invokePath": f"/sellers/{seller.id}/agents/{agent.id}/tools/{tool.id}/invoke",
+            }
+            for tool in tools
+        ]
+        endpoint_host = ""
+        for tool in tools:
+            endpoint = tool.endpoint_url or agent.endpoint_url
+            if endpoint:
+                endpoint_host = endpoint.split("/")[2] if "://" in endpoint else endpoint
+                break
+        cards.append(
+            {
+                "id": f"{seller.id}:{agent.id}",
+                "sellerId": seller.id,
+                "agentId": agent.id,
+                "name": agent.name,
+                "description": agent.description,
+                "category": agent.category,
+                "endpointUrl": agent.endpoint_url,
+                "endpointHost": endpoint_host,
+                "httpMethod": agent.http_method,
+                "apiDocsUrl": agent.api_docs_url,
+                "metadataUri": agent.metadata_uri,
+                "iconDataUrl": agent.icon_data_url,
+                "status": agent.status,
+                "healthStatus": agent.health_status,
+                "lastHealthCheckAt": agent.last_health_check_at.isoformat()
+                if agent.last_health_check_at is not None
+                else None,
+                "arc": {
+                    "network": "Arc Testnet",
+                    "agentId": agent.arc_agent_id,
+                    "identityTxHash": agent.identity_tx_hash,
+                    "registered": bool(agent.arc_agent_id and agent.identity_tx_hash),
+                },
+                "seller": {
+                    "id": seller.id,
+                    "name": seller.name,
+                    "description": seller.description,
+                    "walletAddress": seller.owner_wallet_address,
+                    "validatorWalletAddress": seller.validator_wallet_address,
+                    "status": seller.status,
+                },
+                "commerce": {
+                    "pricingModel": "On-chain metered",
+                    "paymentProtocol": "arc-usdc",
+                    "network": "arcTestnet",
+                    "minPriceUSDC": min_price,
+                    "toolCount": len(tools),
+                },
+                "tools": tool_payloads,
+            }
+        )
+    return cards
 
 
 def get_tool(db: Session, tool_id: int) -> Tool | None:
@@ -223,6 +368,40 @@ def get_tool_for_agent(db: Session, *, seller_id: int, agent_id: int, tool_id: i
     return db.scalar(stmt)
 
 
+def list_skills_for_tool(db: Session, tool_id: int) -> list[Skill]:
+    return list(db.scalars(select(Skill).where(Skill.tool_id == tool_id, Skill.enabled.is_(True)).order_by(Skill.created_at)))
+
+
+def update_tool_pricing(
+    db: Session,
+    *,
+    seller_id: int,
+    agent_id: int,
+    tool_id: int,
+    tool_price_usdc: float | None = None,
+    runtime_price_usdc: float | None = None,
+    skill_prices: list[dict[str, Any]] | None = None,
+) -> Tool | None:
+    tool = get_tool_for_agent(db, seller_id=seller_id, agent_id=agent_id, tool_id=tool_id)
+    if tool is None:
+        return None
+    if tool_price_usdc is not None:
+        tool.price_usdc = min(max(float(tool_price_usdc), 0.000001), 0.01)
+    if runtime_price_usdc is not None:
+        tool.runtime_price_usdc = min(max(float(runtime_price_usdc), 0), 0.01)
+    skill_updates = {int(item["skillId"]): item for item in (skill_prices or []) if item.get("skillId")}
+    if skill_updates:
+        rows = list_skills_for_tool(db, tool.id)
+        for row in rows:
+            payload = skill_updates.get(row.id)
+            if payload is None:
+                continue
+            row.price_usdc = min(max(float(payload.get("priceUSDC", row.price_usdc)), 0), 0.01)
+    db.commit()
+    db.refresh(tool)
+    return tool
+
+
 def update_agent_tool_prices(
     db: Session,
     *,
@@ -238,7 +417,7 @@ def update_agent_tool_prices(
     if not tools:
         return 0
 
-    normalized = max(float(base_price_usdc), 0.000001)
+    normalized = min(max(float(base_price_usdc), 0.000001), 0.01)
     for tool in tools:
         tool.price_usdc = normalized
     db.commit()
@@ -433,6 +612,36 @@ def create_buyer_invocation(
     db.commit()
     db.refresh(row)
     return row
+
+
+def create_usage_records(
+    db: Session,
+    *,
+    buyer_invocation_id: int | None,
+    payment_event_id: int | None,
+    tool_id: int | None,
+    usage_components: list[dict[str, Any]],
+) -> list[UsageRecord]:
+    rows: list[UsageRecord] = []
+    for component in usage_components:
+        row = UsageRecord(
+            buyer_invocation_id=buyer_invocation_id,
+            payment_event_id=payment_event_id,
+            tool_id=tool_id,
+            skill_id=component.get("skillId"),
+            component_type=str(component["componentType"]),
+            component_key=str(component["componentKey"]),
+            component_name=str(component["componentName"]),
+            units=float(component["units"]),
+            unit_price_usdc=float(component["unitPriceUSDC"]),
+            subtotal_usdc=float(component["subtotalUSDC"]),
+        )
+        db.add(row)
+        rows.append(row)
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+    return rows
 
 
 def list_buyer_invocations(db: Session, buyer_id: int, *, limit: int = 50) -> list[BuyerInvocation]:

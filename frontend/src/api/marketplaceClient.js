@@ -33,6 +33,11 @@ export async function listMarketplaceTools() {
   return data?.tools || []
 }
 
+export async function listMarketplaceAgents() {
+  const data = await request("/marketplace/agents")
+  return data?.agents || []
+}
+
 export async function listSellers() {
   const data = await request("/sellers")
   return data?.sellers || []
@@ -60,6 +65,13 @@ export async function createAgent(sellerId, payload) {
 
 export async function updateAgentPricing(sellerId, agentId, payload) {
   return request(`/sellers/${sellerId}/agents/${agentId}/pricing`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateToolPricing(sellerId, agentId, toolId, payload) {
+  return request(`/sellers/${sellerId}/agents/${agentId}/tools/${toolId}/pricing`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   })

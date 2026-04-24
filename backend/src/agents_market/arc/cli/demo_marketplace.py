@@ -11,6 +11,7 @@ from agents_market._env import load_backend_env
 
 BASE_URL = "http://localhost:4021"
 DEFAULT_DEMO_METADATA_URI = "https://your-agent-domain/.well-known/agent-card.json"
+DEFAULT_PROVIDER_ENDPOINT = "http://localhost:4021/health"
 
 
 @dataclass
@@ -60,7 +61,11 @@ def ensure_seller_and_agent(seed: SellerSeed) -> tuple[int, int]:
             f"/sellers/{seller_id}/agents",
             {
                 "name": seed.agent_name,
-                "description": "Hackathon marketplace demo agent",
+                "description": "Hackathon marketplace provider endpoint",
+                "category": "Analytics",
+                "endpointUrl": os.getenv("DEMO_PROVIDER_ENDPOINT", DEFAULT_PROVIDER_ENDPOINT).strip(),
+                "httpMethod": "GET",
+                "priceUSDC": 0.01,
                 "metadataUri": seed.metadata_uri,
             },
         )["agent"]
@@ -73,7 +78,7 @@ def main() -> None:
     seeds = [
         SellerSeed(
             name=f"Seller-{idx:02d}",
-            description=f"Mock-open marketplace seller {idx}",
+            description=f"Provider marketplace seller {idx}",
             owner_wallet="0x9789AD5776fD505C026148bB989A69A0DcaC9D28",
             validator_wallet="0xaBB7D9CD054b1E78074c25f8E65c291015871847",
             agent_name=f"Agent-{idx:02d}",
