@@ -4,7 +4,8 @@ Multi-seller Arc marketplace backend for hackathon demos:
 
 - FastAPI service under `src/agents_market/arc/seller/app.py`
 - Seller/agent/tool persistence with SQLAlchemy + Alembic
-- x402 nanopayment execution using Circle Gateway (`circlekit`)
+- x402 nanopayment execution using Circle Gateway (`circlekit`) for external buyers
+- buyerId-driven Arc USDC settlement for registered demo buyers
 - Arc ERC-8004 identity/reputation/validation service endpoints
 - Gateway demo treasury and Bridge Kit workflow endpoints (bridge orchestration stub + records)
 
@@ -104,6 +105,8 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
     "name": "Arb Scout v1",
     "description": "Cross-chain opportunity analysis and execution plans",
     "category": "Analytics",
+    "offeringType": "agent",
+    "protocolType": "http",
     "endpointUrl": "https://your-agent-domain/api/invoke",
     "httpMethod": "POST",
     "priceUSDC": 0.01,
@@ -111,6 +114,9 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
     "metadataUri": "https://your-agent-domain/.well-known/agent-card.json"
   }'
 ```
+
+`offeringType` values: `agent`, `skill`, `mcp_service`  
+`protocolType` values: `http`, `mcp`, `a2a`
 
 3) Verify listing visibility:
 
@@ -124,8 +130,13 @@ curl -s http://localhost:4021/marketplace/agents
 - Paid invoke: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
 - Ledger: `GET /transactions`
 
+Paid invokes support two settlement modes:
+- x402/Gateway: call without payment to receive `402 Payment Required`, then retry with `Payment-Signature`.
+- Registered buyer: include `buyerId` to settle Arc USDC from the platform-managed buyer wallet.
+
 Notes:
 - Each MVP provider listing creates one paid `invoke` tool backed by the developer's endpoint URL.
+- Provider endpoints are preflighted at `{origin}/health` before payment settlement. Endpoints resolving to localhost/private networks are blocked unless `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true` is set for local demos.
 - If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`. All demo wallets are created under the same Circle developer account.
 - For external interoperability, publish your own `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
 - The backend `GET /.well-known/agent-card.json` is currently a marketplace-level aggregated compatibility document.
@@ -135,6 +146,7 @@ Notes:
 - One Circle developer account (`CIRCLE_API_KEY` + `CIRCLE_ENTITY_SECRET`) provisions all demo seller, buyer, owner, and validator wallets.
 - Arc identity registration uses two `ARC-TESTNET` SCA wallets per registered agent or buyer: owner and validator.
 - x402 paid invokes use each seller's `ownerWalletAddress` as the Gateway payment recipient.
+- buyerId paid invokes transfer Arc USDC from the registered buyer wallet to the seller owner wallet.
 - Gateway deposit and balance routes use `SELLER_PRIVATE_KEY` as a shared local demo treasury key. Seller-scoped Gateway endpoints return seller context plus `mode: "shared_demo_treasury"`.
 - This is acceptable for hackathon demos, but production custody should replace the shared key with seller-specific treasury/accounting controls.
 
@@ -211,6 +223,44 @@ Wallet/treasury:
 - `uv run arc-deposit` - deposit USDC into Gateway
 - `uv run arc-keygen` - generate demo keypairs
 - `uv run arc-demo-marketplace` - seed or verify 10 sellers and agents (`DEMO_AGENT_METADATA_URI` optional)
+
+## Buyer SDK (integration wrapper)
+
+For external buyer agents, use `BuyerMarketplaceSDK` instead of re-implementing discovery + invoke logic.
+
+```python
+from decimal import Decimal
+import asyncio
+
+from agents_market.arc.buyer import BuyerMarketplaceSDK
+
+
+async def main() -> None:
+    sdk = BuyerMarketplaceSDK(
+        server_url="http://localhost:4021",
+        buyer_name="My Buyer Agent",
+        # optional: buyer_id=123 to reuse existing buyer
+    )
+    candidates = await sdk.discover(
+        prompt="Find me a concise market summary.",
+        budget_usdc=Decimal("0.01"),
+        desired_tool="auto",
+        max_results=5,
+    )
+    tool = candidates[0]
+    result = await sdk.invoke(
+        candidate=tool,
+        prompt="Give me today's top 3 insights.",
+        selected_skills=tool.first_skill_keys(limit=1),
+        include_buyer_id=True,
+    )
+    print(result["outputText"])
+
+
+asyncio.run(main())
+```
+
+The SDK normalizes candidate URLs, auto-registers buyer identity when needed, and supports budget-aware tool selection with `pick_best(...)`.
 
 ## Alembic migrations
 

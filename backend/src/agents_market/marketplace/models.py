@@ -60,6 +60,8 @@ class Agent(Base):
     metadata_uri: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     icon_data_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
     category: Mapped[str] = mapped_column(String(80), default="General", nullable=False)
+    offering_type: Mapped[str] = mapped_column(String(32), default="agent", nullable=False)
+    protocol_type: Mapped[str] = mapped_column(String(32), default="http", nullable=False)
     endpoint_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     http_method: Mapped[str] = mapped_column(String(12), default="POST", nullable=False)
     api_docs_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)

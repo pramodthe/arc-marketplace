@@ -53,3 +53,18 @@ input {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+.transactions-ticker {
+  display: inline-block;
+  min-width: 100%;
+  animation: ticker-scroll 40s linear infinite;
+}
+
+@keyframes ticker-scroll {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}

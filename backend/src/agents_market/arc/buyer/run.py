@@ -1,12 +1,10 @@
 import asyncio
 import os
-import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import httpx
-
 from agents_market._env import load_backend_env
+from agents_market.arc.buyer.sdk import BuyerMarketplaceSDK, ToolCandidate
 
 load_backend_env()
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:4021").rstrip("/")
@@ -25,128 +23,52 @@ def _parse_budget() -> Decimal:
         return Decimal("999")
 
 
-def desired_tool_from_task(task: str, prompt: str) -> str:
-    if task in ("summarize", "analyze", "plan", "response"):
-        return task
-    p = prompt.lower()
-    if any(
-        w in p
-        for w in (
-            "roadmap",
-            "milestone",
-            "step-by-step",
-            "sprint plan",
-            "project plan",
-            "three-step",
-            "3-step",
-        )
-    ):
-        return "plan"
-    if any(
-        w in p
-        for w in (
-            "analyze",
-            "compare",
-            "deep dive",
-            "trade-off",
-            "tradeoff",
-            "risk of",
-            "pros and cons",
-        )
-    ):
-        return "analyze"
-    return "summarize"
-
-
-def pick_tool(desired_id: str, budget: Decimal, tools: list[dict]) -> tuple[dict, str] | tuple[None, str]:
-    preference_chains: dict[str, list[str]] = {
-        "plan": ["plan", "analyze", "summarize", "response"],
-        "analyze": ["analyze", "summarize", "response", "plan"],
-        "summarize": ["summarize", "response", "analyze", "plan"],
-        "response": ["response", "summarize", "analyze", "plan"],
-    }
-    chain = preference_chains.get(desired_id, preference_chains["summarize"])
-    by_key = {t["toolKey"]: t for t in tools}
-    for tid in chain:
-        row = by_key.get(tid)
-        if row and budget >= Decimal(str(row["priceUSDC"])):
-            if tid == desired_id:
-                return row, f"selected={tid} (matches task)"
-            return row, f"downgraded_to={tid} (budget or preference)"
-
-    cheapest = sorted(tools, key=lambda t: Decimal(str(t["priceUSDC"])))
-    for row in cheapest:
-        if budget >= Decimal(str(row["priceUSDC"])):
-            return row, f"downgraded_to={row['toolKey']} (fallback)"
-
-    return None, "insufficient_budget_for_any_tool"
-
-
-async def _ensure_buyer_id(http: httpx.AsyncClient) -> int:
-    if BUYER_ID.isdigit():
-        return int(BUYER_ID)
-    response = await http.post(
-        f"{SERVER_URL}/buyers",
-        json={
-            "name": BUYER_NAME,
-            "organization": "Agents Market",
-            "description": "Autonomous buyer for on-chain marketplace tests",
-            "walletAddress": "",
-        },
-    )
-    response.raise_for_status()
-    return int(response.json()["buyer"]["id"])
-
-
 async def run_once(prompt: str, budget: Decimal) -> tuple[Decimal, str]:
-
-    async with httpx.AsyncClient(timeout=10) as http:
-        buyer_id = await _ensure_buyer_id(http)
-        discover_payload = {
-            "prompt": prompt,
-            "budgetUSDC": float(budget),
-            "desiredTool": BUYER_TASK if BUYER_TASK in ("summarize", "analyze", "plan", "response") else "auto",
-            "maxResults": 5,
-        }
-        discovery = (await http.post(f"{SERVER_URL}/marketplace/discover", json=discover_payload)).json()
-        candidates = discovery.get("candidates", [])
-        marketplace_tools = (await http.get(f"{SERVER_URL}/marketplace/tools")).json().get("tools", [])
+    sdk = BuyerMarketplaceSDK(
+        server_url=SERVER_URL,
+        buyer_id=int(BUYER_ID) if BUYER_ID.isdigit() else None,
+        buyer_name=BUYER_NAME,
+        timeout_seconds=30,
+    )
+    desired = sdk.desired_tool_from_prompt(task=BUYER_TASK, prompt=prompt)
+    candidates = await sdk.discover(
+        prompt=prompt,
+        budget_usdc=budget,
+        desired_tool=BUYER_TASK if BUYER_TASK in ("summarize", "analyze", "plan", "response") else "auto",
+        max_results=5,
+    )
+    marketplace_tools = await sdk.list_tools()
     if not marketplace_tools and not candidates:
         print("[buyer] no marketplace tools available")
         return Decimal("0"), "insufficient_budget_for_any_tool"
 
-    desired = desired_tool_from_task(BUYER_TASK, prompt)
-    top_candidate = candidates[0]["candidate"] if candidates else None
+    top_candidate = candidates[0] if candidates else None
     tool = top_candidate
-    reason = f"autonomous_discovery score={candidates[0]['score']:.3f}" if candidates else "fallback"
+    reason = "autonomous_discovery"
     if tool is None:
-        tool, reason = pick_tool(desired, budget, marketplace_tools)
+        tool, reason = sdk.pick_best(
+            desired_tool=desired,
+            budget_usdc=budget,
+            candidates=candidates,
+            fallback_tools=marketplace_tools,
+        )
     if tool is None:
         print(f"[buyer] skip: {reason} (budget={budget})")
         return Decimal("0"), reason
 
-    if tool.get("invokeUrl"):
-        url = str(tool["invokeUrl"])
-    else:
-        invoke_path = f"/sellers/{tool['seller']['id']}/agents/{tool['agent']['id']}/tools/{tool['toolId']}/invoke"
-        url = f"{SERVER_URL}{invoke_path}"
-    selected_skills = [skill["skillKey"] for skill in (tool.get("skills") or [])[:1]]
+    selected_skills = tool.first_skill_keys(limit=1)
+    assert isinstance(tool, ToolCandidate)
     print(
-        f"[buyer] {reason} | source={tool.get('source','internal')} "
-        f"| tool={tool['toolKey']} | start_price=${Decimal(str(tool['priceUSDC'])):.4f} | url={url}"
+        f"[buyer] {reason} | source={tool.source} "
+        f"| tool={tool.tool_key} | start_price=${tool.price_usdc:.4f} | url={tool.invoke_url}"
     )
 
-    async with httpx.AsyncClient(timeout=30) as http:
-        response = await http.post(
-            url,
-            json={
-                "prompt": prompt,
-                "buyerId": buyer_id,
-                "selectedSkills": selected_skills,
-            },
-        )
-        response.raise_for_status()
-        result = response.json()
+    result = await sdk.invoke(
+        candidate=tool,
+        prompt=prompt,
+        selected_skills=selected_skills,
+        include_buyer_id=True,
+    )
     spent = Decimal(str(result["payment"]["amountUSDC"]))
     output_text = result.get("outputText", "")
 

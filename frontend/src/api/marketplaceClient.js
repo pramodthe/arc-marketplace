@@ -63,6 +63,12 @@ export async function createAgent(sellerId, payload) {
   return data?.agent
 }
 
+export async function deleteAgent(sellerId, agentId) {
+  return request(`/sellers/${sellerId}/agents/${agentId}`, {
+    method: "DELETE",
+  })
+}
+
 export async function updateAgentPricing(sellerId, agentId, payload) {
   return request(`/sellers/${sellerId}/agents/${agentId}/pricing`, {
     method: "PATCH",
@@ -75,4 +81,8 @@ export async function updateToolPricing(sellerId, agentId, toolId, payload) {
     method: "PATCH",
     body: JSON.stringify(payload),
   })
+}
+
+export async function getTransactions() {
+  return request("/transactions")
 }

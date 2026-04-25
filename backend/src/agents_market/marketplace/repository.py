@@ -33,28 +33,22 @@ def _slugify(value: str, *, fallback: str) -> str:
     return slug or fallback
 
 
-def _tool_skill_payload(db: Session, tool_id: int) -> list[dict[str, Any]]:
-    rows = list(
-        db.scalars(select(Skill).where(Skill.tool_id == tool_id, Skill.enabled.is_(True)).order_by(Skill.created_at))
-    )
-    return [
-        {
-            "skillId": row.id,
-            "skillKey": row.skill_key,
-            "name": row.name,
-            "description": row.description,
-            "priceUSDC": row.price_usdc,
-        }
-        for row in rows
-    ]
-
-
 def list_sellers(db: Session) -> list[Seller]:
     return list(db.scalars(select(Seller).order_by(desc(Seller.created_at))))
 
 
 def get_seller(db: Session, seller_id: int) -> Seller | None:
     return db.get(Seller, seller_id)
+
+
+def update_seller_status(db: Session, *, seller_id: int, status: str) -> Seller | None:
+    seller = get_seller(db, seller_id)
+    if seller is None:
+        return None
+    seller.status = status
+    db.commit()
+    db.refresh(seller)
+    return seller
 
 
 def create_seller(
@@ -124,6 +118,52 @@ def get_agent(db: Session, agent_id: int) -> Agent | None:
     return db.get(Agent, agent_id)
 
 
+def delete_agent_for_seller(db: Session, *, seller_id: int, agent_id: int) -> dict[str, Any] | None:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id, Agent.seller_id == seller_id))
+    if agent is None:
+        return None
+    tool_ids = [tool.id for tool in agent.tools]
+
+    payment_where = PaymentEvent.agent_id == agent.id
+    invocation_where = BuyerInvocation.agent_id == agent.id
+    if tool_ids:
+        payment_where = payment_where | PaymentEvent.tool_id.in_(tool_ids)
+        invocation_where = invocation_where | BuyerInvocation.tool_id.in_(tool_ids)
+
+    linked_payment_events = db.scalar(select(func.count(PaymentEvent.id)).where(payment_where)) or 0
+    linked_invocations = db.scalar(select(func.count(BuyerInvocation.id)).where(invocation_where)) or 0
+    linked_reputation = db.scalar(select(func.count(ReputationEvent.id)).where(ReputationEvent.agent_id == agent.id)) or 0
+    linked_validation = (
+        db.scalar(select(func.count(ValidationRequest.id)).where(ValidationRequest.agent_id == agent.id)) or 0
+    )
+    linked_usage = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.tool_id.in_(tool_ids))) if tool_ids else 0
+    linked_usage = linked_usage or 0
+
+    has_linked_records = any(
+        count > 0
+        for count in (
+            linked_payment_events,
+            linked_invocations,
+            linked_reputation,
+            linked_validation,
+            linked_usage,
+        )
+    )
+
+    if has_linked_records:
+        # Preserve historical rows that reference this agent/tool set.
+        agent.status = "deleted"
+        for tool in agent.tools:
+            tool.enabled = False
+        db.commit()
+        db.refresh(agent)
+        return {"deleted": True, "deletionMode": "soft", "reason": "linked_records_preserved"}
+
+    db.delete(agent)
+    db.commit()
+    return {"deleted": True, "deletionMode": "hard"}
+
+
 def create_agent(
     db: Session,
     *,
@@ -133,6 +173,8 @@ def create_agent(
     metadata_uri: str,
     icon_data_url: str,
     category: str,
+    offering_type: str,
+    protocol_type: str,
     endpoint_url: str,
     http_method: str,
     api_docs_url: str,
@@ -146,6 +188,8 @@ def create_agent(
         metadata_uri=metadata_uri,
         icon_data_url=icon_data_url,
         category=category,
+        offering_type=offering_type,
+        protocol_type=protocol_type,
         endpoint_url=endpoint_url,
         http_method=http_method,
         api_docs_url=api_docs_url,
@@ -234,9 +278,11 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "runtimeUnit": tool.runtime_unit,
                 "capabilityType": tool.capability_type,
                 "category": tool.category,
+                "offeringType": agent.offering_type,
+                "protocolType": agent.protocol_type,
                 "endpointUrl": tool.endpoint_url or agent.endpoint_url,
                 "httpMethod": tool.http_method or agent.http_method,
-                "skills": _tool_skill_payload(db, tool.id),
+                "skills": [],
                 "invokeUrl": f"/sellers/{seller.id}/agents/{agent.id}/tools/{tool.id}/invoke",
                 "seller": {"id": seller.id, "name": seller.name, "walletAddress": seller.owner_wallet_address},
                 "agent": {
@@ -293,7 +339,7 @@ def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "category": tool.category,
                 "endpointUrl": tool.endpoint_url or agent.endpoint_url,
                 "httpMethod": tool.http_method or agent.http_method,
-                "skills": _tool_skill_payload(db, tool.id),
+                "skills": [],
                 "invokePath": f"/sellers/{seller.id}/agents/{agent.id}/tools/{tool.id}/invoke",
             }
             for tool in tools
@@ -312,6 +358,8 @@ def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "name": agent.name,
                 "description": agent.description,
                 "category": agent.category,
+                "offeringType": agent.offering_type,
+                "protocolType": agent.protocol_type,
                 "endpointUrl": agent.endpoint_url,
                 "endpointHost": endpoint_host,
                 "httpMethod": agent.http_method,
@@ -389,14 +437,7 @@ def update_tool_pricing(
         tool.price_usdc = min(max(float(tool_price_usdc), 0.000001), 0.01)
     if runtime_price_usdc is not None:
         tool.runtime_price_usdc = min(max(float(runtime_price_usdc), 0), 0.01)
-    skill_updates = {int(item["skillId"]): item for item in (skill_prices or []) if item.get("skillId")}
-    if skill_updates:
-        rows = list_skills_for_tool(db, tool.id)
-        for row in rows:
-            payload = skill_updates.get(row.id)
-            if payload is None:
-                continue
-            row.price_usdc = min(max(float(payload.get("priceUSDC", row.price_usdc)), 0), 0.01)
+    # Billable skill pricing is disabled for now.
     db.commit()
     db.refresh(tool)
     return tool

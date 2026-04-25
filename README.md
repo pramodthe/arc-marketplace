@@ -15,7 +15,7 @@ The repository has:
 
 ### Core implemented flows
 - **Marketplace CRUD + discovery**: create sellers/agents, list tools, and rank tools by prompt + budget.
-- **Paid invocation flow**: buyer pays via x402/Gateway before calling seller tool endpoints.
+- **Paid invocation flow**: external buyers can pay via x402/Gateway; registered demo buyers can pay via buyerId-driven Arc USDC settlement.
 - **Ledgering**: payment and output events are persisted for transaction/frequency reporting.
 - **Arc lifecycle endpoints**: ERC-8004 style register/reputation/validation request/response flows.
 - **Wallet/gateway operations**: provision Circle developer-controlled wallets and operate a shared demo Gateway treasury for balance/deposit checks.
@@ -105,6 +105,7 @@ Use `backend/.env.example` as the source of truth. Key variables:
   - `PRIVATE_KEY`: buyer wallet private key.
   - `SELLER_PRIVATE_KEY`: shared hackathon Gateway treasury key for demo deposit/balance operations.
   - `SERVER_URL`, `PORT`, `PUBLIC_BASE_URL`.
+  - `ALLOW_PRIVATE_PROVIDER_ENDPOINTS`: set to `true` only for local demos that register `localhost` or private-network provider URLs.
 - **Database**
   - `DATABASE_URL` (default SQLite).
 - **Buyer behavior**
@@ -288,8 +289,9 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
 2. Buyer uses Gateway client to call paid endpoint.
 3. Seller returns payment challenge when no valid payment signature is present.
 4. Buyer signs payment authorization and retries with payment header.
-5. Seller verifies payment through Gateway middleware.
-6. Seller executes tool, returns response, and logs transaction/payment events.
+5. Seller preflights the provider `/health` endpoint, then verifies and settles payment through Gateway middleware.
+6. Seller executes tool, returns response with x402 payment confirmation, and logs transaction/payment events.
+7. Registered demo buyers can alternatively send `buyerId`; the platform settles Arc USDC from the buyer wallet before invoking the provider.
 
 This design is what enables per-action monetization and high-frequency transaction logging for hackathon evidence.
 
@@ -300,6 +302,7 @@ This design is what enables per-action monetization and high-frequency transacti
 - One Circle developer account (`CIRCLE_API_KEY` + `CIRCLE_ENTITY_SECRET`) provisions all demo seller, buyer, owner, and validator wallets.
 - Arc identity registration remains seller/agent-specific: each Arc-registered agent receives owner and validator wallets on `ARC-TESTNET`.
 - x402 paid invokes use the seller's `ownerWalletAddress` as the payment recipient in the Gateway payment challenge.
+- Provider endpoint URLs that resolve to localhost or private networks are blocked by default. For Docker/local demos, set `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true`.
 - Gateway deposit and balance routes use `SELLER_PRIVATE_KEY` as a shared local demo treasury key. The seller-scoped Gateway endpoints are compatibility views that include seller context plus `mode: "shared_demo_treasury"`.
 - This is acceptable for hackathon evidence and local demos. Production custody should replace the shared private key with seller-specific treasury/accounting controls.
 

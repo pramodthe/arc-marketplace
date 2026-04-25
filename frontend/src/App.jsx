@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowUpRight,
+  CandlestickChart,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -12,8 +13,10 @@ import {
   Layers3,
   Link2,
   Loader2,
+  Radio,
   Search,
   Shield,
+  Trash2,
   UserRoundPlus,
   Wallet,
 } from "lucide-react"
@@ -25,8 +28,11 @@ import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card.
 import { Input } from "@/components/ui/input.jsx"
 import { Separator } from "@/components/ui/separator.jsx"
 import {
+  API_BASE_URL,
   createAgent,
+  deleteAgent,
   createSeller,
+  getTransactions,
   getSeller,
   listMarketplaceAgents,
   updateToolPricing,
@@ -43,23 +49,144 @@ function scrollToTop() {
   window.scrollTo({ top: 0, behavior: "auto" })
 }
 
+/** Full URL for POST invoke; clipboard APIs often fail silently if not awaited or if context is not secure. */
+function resolveInvokeUrl(agent) {
+  const path =
+    agent.invokePath ||
+    (agent.tools?.[0]?.toolId != null
+      ? `/sellers/${agent.sellerId}/agents/${agent.agentId}/tools/${agent.tools[0].toolId}/invoke`
+      : "")
+  if (!path) return ""
+  if (path.startsWith("http://") || path.startsWith("https://")) return path
+  const normalized = path.startsWith("/") ? path : `/${path}`
+  return `${API_BASE_URL}${normalized}`
+}
+
+async function copyTextToClipboard(text) {
+  if (!text) return false
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement("textarea")
+    ta.value = text
+    ta.setAttribute("readonly", "")
+    ta.style.position = "fixed"
+    ta.style.left = "-9999px"
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand("copy")
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
 function readRouteFromPath() {
-  if (window.location.pathname === "/agents/register") {
+  const pathname = window.location.pathname.replace(/\/+$/, "") || "/"
+
+  if (pathname.startsWith("/transactions")) {
+    return { page: "transactions" }
+  }
+
+  if (pathname === "/agents/register") {
     return { page: "register" }
   }
 
-  const editMatch = window.location.pathname.match(/^\/agents\/([^/]+)\/edit$/)
+  const editMatch = pathname.match(/^\/agents\/([^/]+)\/edit$/)
   if (editMatch) {
     return { agentId: decodeURIComponent(editMatch[1]), page: "edit" }
   }
 
-  const match = window.location.pathname.match(/^\/agents\/([^/]+)$/)
+  const match = pathname.match(/^\/agents\/([^/]+)$/)
   if (!match) return null
   return { agentId: decodeURIComponent(match[1]), page: "detail" }
 }
 
 function normalizeSearch(value) {
   return value.trim().toLowerCase()
+}
+
+function formatClock(timestamp) {
+  if (!timestamp) return "--:--:--"
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return "--:--:--"
+  return date.toLocaleTimeString([], { hour12: false })
+}
+
+function shortHash(value) {
+  if (!value) return "Pending"
+  if (value.length <= 16) return value
+  return `${value.slice(0, 8)}...${value.slice(-8)}`
+}
+
+/** Arc Testnet explorer (Blockscout) — wallet + tx deep links */
+const ARCSCAN_TESTNET_BASE = "https://testnet.arcscan.app"
+
+function isHexAddress(value) {
+  return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/i.test(value.trim())
+}
+
+function isHexTxHash(value) {
+  const raw = (value || "").trim()
+  if (!raw || raw === "pending") return false
+  const hex = raw.startsWith("0x") ? raw.slice(2) : raw
+  return /^[a-fA-F0-9]{64}$/i.test(hex)
+}
+
+function explorerAddressUrl(address) {
+  if (!isHexAddress(address)) return null
+  return `${ARCSCAN_TESTNET_BASE}/address/${address.trim()}`
+}
+
+function explorerTxUrl(hash) {
+  if (!isHexTxHash(hash)) return null
+  const normalized = hash.trim().startsWith("0x") ? hash.trim().toLowerCase() : `0x${hash.trim().toLowerCase()}`
+  return `${ARCSCAN_TESTNET_BASE}/tx/${normalized}`
+}
+
+function ExplorerAddressLink({ address, className = "" }) {
+  const url = explorerAddressUrl(address)
+  const label = shortHash(address)
+  if (!url) {
+    return <span className={`font-mono text-zinc-400 ${className}`.trim()}>{label}</span>
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer noopener"
+      className={`font-mono text-sky-300 underline-offset-2 hover:text-sky-200 hover:underline ${className}`.trim()}
+      title={address}
+    >
+      {label}
+    </a>
+  )
+}
+
+function ExplorerTxLink({ hash }) {
+  const url = explorerTxUrl(hash)
+  const label = shortHash(hash)
+  if (!url) {
+    return <span className="font-mono text-sky-300">{label}</span>
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="font-mono text-sky-300 underline-offset-2 hover:text-sky-200 hover:underline"
+      title={hash}
+    >
+      {label}
+    </a>
+  )
 }
 
 function MetricCard({ dotClassName, icon: Icon, title, children }) {
@@ -75,7 +202,7 @@ function MetricCard({ dotClassName, icon: Icon, title, children }) {
   )
 }
 
-function AgentCard({ agent, onOpen }) {
+function AgentCard({ agent, onOpen, onDelete, isDeleting }) {
   return (
     <Card
       className="group cursor-pointer rounded-xl border-zinc-800 bg-zinc-950/90 text-zinc-50 shadow-none transition-colors hover:border-zinc-700"
@@ -105,6 +232,21 @@ function AgentCard({ agent, onOpen }) {
           </div>
           <p className="mt-0.5 text-[10px] text-zinc-500">{agent.shortAddress}</p>
         </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          disabled={isDeleting}
+          className="size-8 shrink-0 rounded-md text-zinc-500 hover:bg-zinc-900 hover:text-red-300"
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onDelete(agent)
+          }}
+          aria-label={`Delete ${agent.name}`}
+        >
+          {isDeleting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+        </Button>
       </CardHeader>
       <CardContent className="space-y-3 px-4 pb-3 pt-0">
         <p className="line-clamp-3 min-h-[48px] text-[11px] leading-4 text-zinc-400">
@@ -156,6 +298,8 @@ function AgentListScreen({
   onPrevPage,
   onNextPage,
   onSelectPage,
+  onDelete,
+  deletingAgentIds,
 }) {
   const pageStart = allCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
   const pageEnd = Math.min(page * PAGE_SIZE, allCount)
@@ -239,7 +383,13 @@ function AgentListScreen({
       {!loadError ? (
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {agents.map((agent) => (
-            <AgentCard key={agent.id} agent={agent} onOpen={onOpen} />
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              onOpen={onOpen}
+              onDelete={onDelete}
+              isDeleting={deletingAgentIds.has(agent.id)}
+            />
           ))}
         </div>
       ) : null}
@@ -309,7 +459,6 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
         httpMethod: "POST",
         priceUsdc: "0.01",
         runtimePriceUsdc: "0.00",
-        skills: [],
       },
     ],
   })
@@ -327,21 +476,6 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
     }))
   }
 
-  function updateCapabilitySkill(capabilityIndex, skillIndex, key, value) {
-    setForm((current) => ({
-      ...current,
-      capabilities: current.capabilities.map((capability, currentCapabilityIndex) => {
-        if (currentCapabilityIndex !== capabilityIndex) return capability
-        return {
-          ...capability,
-          skills: capability.skills.map((skill, currentSkillIndex) =>
-            currentSkillIndex === skillIndex ? { ...skill, [key]: value } : skill,
-          ),
-        }
-      }),
-    }))
-  }
-
   function addCapability() {
     setForm((current) => ({
       ...current,
@@ -356,7 +490,6 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
           httpMethod: "POST",
           priceUsdc: "0.01",
           runtimePriceUsdc: "0.00",
-          skills: [],
         },
       ],
     }))
@@ -369,42 +502,6 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
         current.capabilities.length === 1
           ? current.capabilities
           : current.capabilities.filter((_, capabilityIndex) => capabilityIndex !== index),
-    }))
-  }
-
-  function addSkill(capabilityIndex) {
-    setForm((current) => ({
-      ...current,
-      capabilities: current.capabilities.map((capability, currentCapabilityIndex) =>
-        currentCapabilityIndex === capabilityIndex
-          ? {
-              ...capability,
-              skills: [
-                ...capability.skills,
-                {
-                  skillKey: `skill-${capability.skills.length + 1}`,
-                  name: "",
-                  description: "",
-                  priceUsdc: "0.00",
-                },
-              ],
-            }
-          : capability,
-      ),
-    }))
-  }
-
-  function removeSkill(capabilityIndex, skillIndex) {
-    setForm((current) => ({
-      ...current,
-      capabilities: current.capabilities.map((capability, currentCapabilityIndex) =>
-        currentCapabilityIndex === capabilityIndex
-          ? {
-              ...capability,
-              skills: capability.skills.filter((_, currentSkillIndex) => currentSkillIndex !== skillIndex),
-            }
-          : capability,
-      ),
     }))
   }
 
@@ -672,78 +769,9 @@ function RegisterAgentScreen({ onBack, onSubmit, isSubmitting, submitError }) {
                       </label>
                     </div>
                     <div className="mt-4 rounded-xl border border-zinc-800 bg-[#0d0d0d] p-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <p className="text-sm font-medium text-zinc-100">Billable Skills</p>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="h-8 rounded-lg border-zinc-800 bg-[#111111] text-xs text-zinc-100 hover:bg-zinc-900"
-                          onClick={() => addSkill(capabilityIndex)}
-                        >
-                          Add Skill
-                        </Button>
-                      </div>
-                      <div className="space-y-3">
-                        {capability.skills.length === 0 ? (
-                          <p className="text-xs text-zinc-500">No billable skills configured.</p>
-                        ) : null}
-                        {capability.skills.map((skill, skillIndex) => (
-                          <div
-                            key={`${skill.skillKey}-${skillIndex}`}
-                            className="grid gap-3 rounded-xl border border-zinc-800 bg-[#111111] p-3 sm:grid-cols-4"
-                          >
-                            <label className="block">
-                              <span className="mb-2 block text-xs text-zinc-100">Key</span>
-                              <Input
-                                value={skill.skillKey}
-                                onChange={(event) =>
-                                  updateCapabilitySkill(capabilityIndex, skillIndex, "skillKey", event.target.value)
-                                }
-                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
-                              />
-                            </label>
-                            <label className="block">
-                              <span className="mb-2 block text-xs text-zinc-100">Name</span>
-                              <Input
-                                value={skill.name}
-                                onChange={(event) =>
-                                  updateCapabilitySkill(capabilityIndex, skillIndex, "name", event.target.value)
-                                }
-                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
-                              />
-                            </label>
-                            <label className="block sm:col-span-2">
-                              <span className="mb-2 block text-xs text-zinc-100">Description</span>
-                              <Input
-                                value={skill.description}
-                                onChange={(event) =>
-                                  updateCapabilitySkill(capabilityIndex, skillIndex, "description", event.target.value)
-                                }
-                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
-                              />
-                            </label>
-                            <label className="block">
-                              <span className="mb-2 block text-xs text-zinc-100">Price (USDC)</span>
-                              <Input
-                                value={skill.priceUsdc}
-                                onChange={(event) =>
-                                  updateCapabilitySkill(capabilityIndex, skillIndex, "priceUsdc", event.target.value)
-                                }
-                                className="h-10 rounded-lg border-zinc-800 bg-[#0d0d0d] text-zinc-100"
-                              />
-                            </label>
-                            <div className="flex items-end">
-                              <button
-                                type="button"
-                                className="h-10 text-xs text-zinc-500 hover:text-zinc-100"
-                                onClick={() => removeSkill(capabilityIndex, skillIndex)}
-                              >
-                                Remove Skill
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <p className="text-xs text-zinc-500">
+                        Billable skills are disabled in this version. Pricing is tool + optional runtime only.
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -849,11 +877,6 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
         name: tool.name,
         toolPriceUSDC: String(tool.priceUSDC ?? "0.01"),
         runtimePriceUSDC: String(tool.runtimePriceUSDC ?? "0"),
-        skillPrices: (tool.skills || []).map((skill) => ({
-          skillId: skill.skillId,
-          name: skill.name,
-          priceUSDC: String(skill.priceUSDC ?? "0"),
-        })),
       })) || [],
   )
 
@@ -865,21 +888,6 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
   function updateTool(index, key, value) {
     setToolForms((current) =>
       current.map((tool, toolIndex) => (toolIndex === index ? { ...tool, [key]: value } : tool)),
-    )
-  }
-
-  function updateSkill(toolIndex, skillIndex, value) {
-    setToolForms((current) =>
-      current.map((tool, currentToolIndex) =>
-        currentToolIndex === toolIndex
-          ? {
-              ...tool,
-              skillPrices: tool.skillPrices.map((skill, currentSkillIndex) =>
-                currentSkillIndex === skillIndex ? { ...skill, priceUSDC: value } : skill,
-              ),
-            }
-          : tool,
-      ),
     )
   }
 
@@ -897,7 +905,7 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
         <CardHeader className="space-y-2 p-6">
           <h1 className="text-xl font-semibold">Update Capability Pricing</h1>
           <p className="text-sm text-zinc-400">
-            Each capability settles on-chain. Update the tool charge, optional runtime charge, and any billable skills.
+            Each capability settles on-chain. Update the tool charge and optional runtime charge.
           </p>
         </CardHeader>
         <CardContent className="space-y-4 p-6 pt-0 text-sm text-zinc-300">
@@ -934,22 +942,9 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
                     />
                   </label>
                 </div>
-                {(tool.skillPrices || []).length ? (
-                  <div className="mt-4 space-y-3 rounded-xl border border-zinc-800 bg-[#0d0d0d] p-4">
-                    <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Billable Skills</p>
-                    {tool.skillPrices.map((skill, skillIndex) => (
-                      <label key={skill.skillId} className="block">
-                        <span className="mb-2 block text-zinc-100">{skill.name}</span>
-                        <Input
-                          value={skill.priceUSDC}
-                          onChange={(event) => updateSkill(toolIndex, skillIndex, event.target.value)}
-                          placeholder="0.00"
-                          className="h-11 rounded-xl border-zinc-800 bg-[#111111] text-zinc-100"
-                        />
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
+                <div className="mt-4 rounded-xl border border-zinc-800 bg-[#0d0d0d] p-3 text-xs text-zinc-500">
+                  Billable skills are disabled in this version.
+                </div>
               </div>
             ))}
             {submitError ? (
@@ -991,6 +986,27 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
 
 function AgentDetailScreen({ agent, onBack, onEditPricing }) {
   const sellerBalances = agent.sellerBalances || {}
+  const [invokeCopied, setInvokeCopied] = useState(false)
+
+  useEffect(() => {
+    setInvokeCopied(false)
+  }, [agent.id])
+
+  async function handleCopyInvokeUrl() {
+    const url = resolveInvokeUrl(agent)
+    if (!url) {
+      window.alert("No invoke URL is available yet for this agent.")
+      return
+    }
+    const ok = await copyTextToClipboard(url)
+    if (ok) {
+      setInvokeCopied(true)
+      window.setTimeout(() => setInvokeCopied(false), 2000)
+    } else {
+      window.prompt("Clipboard was blocked. Copy this URL manually:", url)
+    }
+  }
+
   return (
     <section className="mx-auto max-w-[1060px] px-0 py-8">
       <button
@@ -1086,22 +1102,9 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
                       <span className="text-zinc-500">Runtime Unit:</span> {tool.runtimeUnit}
                     </p>
                   </div>
-                  {(tool.skills || []).length ? (
-                    <div className="mt-3">
-                      <p className="text-[12px] uppercase tracking-[0.14em] text-zinc-500">Billable Skills</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {tool.skills.map((skill) => (
-                          <Badge
-                            key={skill.skillId}
-                            variant="outline"
-                            className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300"
-                          >
-                            {skill.name} · {Number(skill.priceUSDC || 0).toFixed(4)} USDC
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
+                  <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-[11px] text-zinc-500">
+                    Billable skills disabled
+                  </div>
                 </div>
               ))}
             </div>
@@ -1117,7 +1120,7 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
                   <span className="text-zinc-500">Starting Price (USDC):</span> {agent.profile?.basePriceUsdc}
                 </p>
                 <p className="sm:col-span-2">
-                  <span className="text-zinc-500">Capabilities:</span> {agent.toolCount} tools / {agent.skillCount} skills
+                  <span className="text-zinc-500">Capabilities:</span> {agent.toolCount} tools
                 </p>
               </div>
             </div>
@@ -1200,10 +1203,11 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
                 <Button
                   variant="outline"
                   className="h-8 w-full justify-center gap-1.5 rounded-md border-zinc-800 bg-zinc-950 text-xs text-zinc-100 hover:bg-zinc-900"
-                  onClick={() => agent.invokePath && navigator.clipboard?.writeText(agent.invokePath)}
+                  type="button"
+                  onClick={() => void handleCopyInvokeUrl()}
                 >
                   <ExternalLink data-icon="inline-start" />
-                  {agent.explorerLabel}
+                  {invokeCopied ? "Copied" : agent.explorerLabel}
                 </Button>
                 <Button
                   variant="outline"
@@ -1222,6 +1226,165 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
   )
 }
 
+function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh }) {
+  const events = transactionsState?.events || []
+  const summary = transactionsState?.summary || {}
+  const buyers = transactionsState?.buyers || []
+  const txRows = events.filter((event) => event.eventType === "payment")
+  const latestRows = txRows.slice(0, 40)
+
+  return (
+    <section className="mx-auto max-w-[1240px]">
+      <Card className="rounded-2xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
+        <CardHeader className="border-b border-zinc-800 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <CandlestickChart className="size-4 text-sky-300" />
+              <p className="text-sm font-semibold tracking-wide text-zinc-100">Arc Transaction Explorer</p>
+              <Badge className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/15">
+                <Radio className="mr-1 size-3" />
+                LIVE
+              </Badge>
+            </div>
+            <Button
+              variant="outline"
+              className="h-8 rounded-md border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 hover:bg-zinc-900"
+              onClick={onRefresh}
+            >
+              Refresh
+            </Button>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Total Txs</p>
+              <p className="mt-1 text-lg font-semibold text-zinc-100">{summary.total ?? 0}</p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Paid</p>
+              <p className="mt-1 text-lg font-semibold text-emerald-300">{summary.paid ?? 0}</p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Pay Volume</p>
+              <p className="mt-1 text-lg font-semibold text-sky-300">{summary.totalPaidAmountUSDC || "0.000000"} USDC</p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Unique Buyers</p>
+              <p className="mt-1 text-lg font-semibold text-violet-300">{summary.uniqueBuyers ?? 0}</p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-2 text-[11px] uppercase tracking-[0.1em] text-zinc-400">
+            Transactions
+          </div>
+          {loadError ? (
+            <div className="m-4 rounded-lg border border-red-900/60 bg-red-950/20 p-3 text-sm text-red-200">{loadError}</div>
+          ) : null}
+          {isLoading ? (
+            <div className="m-4 flex items-center gap-2 text-sm text-zinc-300">
+              <Loader2 className="size-4 animate-spin" />
+              Loading latest chain activity...
+            </div>
+          ) : null}
+          <div className="max-h-[540px] overflow-auto">
+            <table className="w-full min-w-[980px] text-left text-xs">
+              <thead className="sticky top-0 bg-[#0b0e13] text-zinc-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Txn Hash</th>
+                  <th className="px-4 py-2 font-medium">Method</th>
+                  <th className="px-4 py-2 font-medium">Block Time</th>
+                  <th className="px-4 py-2 font-medium">From</th>
+                  <th className="px-4 py-2 font-medium">To</th>
+                  <th className="px-4 py-2 font-medium">Value (USDC)</th>
+                  <th className="px-4 py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latestRows.map((event, idx) => {
+                  const details = event.details || {}
+                  const statusClass =
+                    event.status === "paid" || event.status === "completed"
+                      ? "text-emerald-300"
+                      : event.status === "failed" || event.status === "provider_failed"
+                        ? "text-red-300"
+                        : "text-amber-300"
+                  const hash = event.onchainTxHash || event.transactionRef || "pending"
+                  const fromAddr = details.payer || details.buyerAddress || "n/a"
+                  const toAddr = details.payee || details.sellerRecipientAddress || "n/a"
+                  return (
+                    <tr key={`${event.timestamp || "none"}-${idx}`} className="border-t border-zinc-800/90">
+                      <td className="px-4 py-2">
+                        <ExplorerTxLink hash={hash} />
+                      </td>
+                      <td className="px-4 py-2 text-zinc-300">{event.eventType}</td>
+                      <td className="px-4 py-2 text-zinc-300">{formatClock(event.timestamp)}</td>
+                      <td className="px-4 py-2">
+                        <ExplorerAddressLink address={fromAddr} />
+                      </td>
+                      <td className="px-4 py-2">
+                        <ExplorerAddressLink address={toAddr} />
+                      </td>
+                      <td className="px-4 py-2 text-zinc-200">{details.amountUSDC || "0.000000"}</td>
+                      <td className={`px-4 py-2 uppercase tracking-[0.12em] ${statusClass}`}>{event.status}</td>
+                    </tr>
+                  )
+                })}
+                {!latestRows.length ? (
+                  <tr>
+                    <td className="px-4 py-4 text-zinc-500" colSpan={7}>
+                      No payment transactions yet.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card className="rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-400">Live Tape</p>
+          </CardHeader>
+          <CardContent className="px-0 pb-4 pt-0">
+            <div className="overflow-hidden border-y border-zinc-800/80 bg-zinc-950/60 py-2">
+              <div className="transactions-ticker whitespace-nowrap px-4 text-xs text-zinc-300">
+                {(events.slice(0, 16).length
+                  ? events.slice(0, 16)
+                  : [{ status: "idle", details: {}, eventType: "waiting", timestamp: "" }]
+                ).map((event, idx) => (
+                  <span key={`${event.timestamp || "none"}-${idx}`} className="mr-6 inline-flex items-center gap-2">
+                    <span className="text-zinc-500">{formatClock(event.timestamp)}</span>
+                    <span className="uppercase tracking-[0.12em] text-zinc-300">{event.eventType}</span>
+                    <span className="text-zinc-400">{event.details?.amountUSDC || "0.000000"} USDC</span>
+                    <span className="text-emerald-300">{event.status}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-400">Top Buyer Wallets</p>
+          </CardHeader>
+          <CardContent className="space-y-2 p-4 pt-2">
+            {buyers.slice(0, 8).map((buyer) => (
+              <div key={buyer.buyerAddress} className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <ExplorerAddressLink address={buyer.buyerAddress} className="text-[11px]" />
+                <span className="text-[11px] text-zinc-400">{buyer.paymentsCount} trades</span>
+                <span className="text-[11px] text-sky-300">{buyer.totalAmountUSDC} USDC</span>
+              </div>
+            ))}
+            {buyers.length === 0 ? <p className="text-xs text-zinc-500">No buyer activity yet.</p> : null}
+          </CardContent>
+        </Card>
+      </div>
+    </section>
+  )
+}
+
 export default function App() {
   const [agents, setAgents] = useState([])
   const [routeState, setRouteState] = useState(() => readRouteFromPath())
@@ -1234,6 +1397,10 @@ export default function App() {
   const [submitError, setSubmitError] = useState("")
   const [isPricingSubmitting, setIsPricingSubmitting] = useState(false)
   const [pricingSubmitError, setPricingSubmitError] = useState("")
+  const [deletingAgentIds, setDeletingAgentIds] = useState(() => new Set())
+  const [transactionsState, setTransactionsState] = useState({ events: [], summary: {}, buyers: [] })
+  const [isTransactionsLoading, setIsTransactionsLoading] = useState(false)
+  const [transactionsError, setTransactionsError] = useState("")
   const mergedAgents = agents
   const selectedAgent = mergedAgents.find((agent) => agent.id === routeState?.agentId) ?? null
   const selectedAgentView = selectedAgent
@@ -1259,9 +1426,36 @@ export default function App() {
     }
   }
 
+  async function refreshTransactions({ silent = false } = {}) {
+    if (!silent) setIsTransactionsLoading(true)
+    setTransactionsError("")
+    try {
+      const payload = await getTransactions()
+      setTransactionsState({
+        events: payload?.events || [],
+        summary: payload?.summary || {},
+        buyers: payload?.buyers || [],
+      })
+    } catch (error) {
+      setTransactionsError(error.message || "Could not load transactions.")
+      setTransactionsState({ events: [], summary: {}, buyers: [] })
+    } finally {
+      if (!silent) setIsTransactionsLoading(false)
+    }
+  }
+
   useEffect(() => {
     refreshAgents()
   }, [])
+
+  useEffect(() => {
+    if (routeState?.page !== "transactions") return undefined
+    refreshTransactions()
+    const intervalId = window.setInterval(() => {
+      refreshTransactions({ silent: true })
+    }, 4000)
+    return () => window.clearInterval(intervalId)
+  }, [routeState?.page])
 
   useEffect(() => {
     const handlePopState = () => setRouteState(readRouteFromPath())
@@ -1271,7 +1465,9 @@ export default function App() {
 
   useEffect(() => {
     document.title =
-      routeState?.page === "register"
+      routeState?.page === "transactions"
+        ? "Live Transactions | ARC-Agents"
+        : routeState?.page === "register"
         ? "Register Agent | ARC-Agents"
         : selectedAgent
           ? `${selectedAgent.name} | ARC-Agents`
@@ -1340,6 +1536,12 @@ export default function App() {
     setRouteState({ page: "register" })
   }
 
+  function openTransactionsScreen() {
+    pushPath("/transactions")
+    scrollToTop()
+    setRouteState({ page: "transactions" })
+  }
+
   async function registerAgent(form) {
     setIsSubmitting(true)
     setSubmitError("")
@@ -1365,20 +1567,6 @@ export default function App() {
         if (!Number.isFinite(runtimePrice) || runtimePrice < 0 || runtimePrice > 0.01) {
           throw new Error(`Capability ${index + 1} runtime price must be between 0 and 0.01 USDC.`)
         }
-        const skills = capability.skills.map((skill, skillIndex) => {
-          const skillPrice = Number(skill.priceUsdc || "0")
-          if (!Number.isFinite(skillPrice) || skillPrice < 0 || skillPrice > 0.01) {
-            throw new Error(
-              `Capability ${index + 1} skill ${skillIndex + 1} price must be between 0 and 0.01 USDC.`,
-            )
-          }
-          return {
-            skillKey: skill.skillKey.trim() || `skill-${skillIndex + 1}`,
-            name: skill.name.trim() || `Skill ${skillIndex + 1}`,
-            description: skill.description.trim(),
-            priceUSDC: skillPrice,
-          }
-        })
         return {
           toolKey: capability.toolKey.trim() || `tool-${index + 1}`,
           name: capability.name.trim() || `Capability ${index + 1}`,
@@ -1389,7 +1577,7 @@ export default function App() {
           priceUSDC: toolPrice,
           runtimePriceUSDC: runtimePrice,
           runtimeUnit: runtimePrice > 0 ? "per_request" : "none",
-          skills,
+          skills: [],
         }
       })
       const seller = await createSeller({
@@ -1442,10 +1630,6 @@ export default function App() {
         await updateToolPricing(selectedAgent.sellerId, selectedAgent.agentId, tool.toolId, {
           toolPriceUSDC: toolPrice,
           runtimePriceUSDC: runtimePrice,
-          skillPrices: (tool.skillPrices || []).map((skill) => ({
-            skillId: skill.skillId,
-            priceUSDC: Number(skill.priceUSDC || "0"),
-          })),
         })
       }
       await refreshAgents({ showLoading: false })
@@ -1454,6 +1638,33 @@ export default function App() {
       setPricingSubmitError(error.message || "Could not update pricing.")
     } finally {
       setIsPricingSubmitting(false)
+    }
+  }
+
+  async function deleteAgentCard(agent) {
+    const confirmed = window.confirm(`Delete ${agent.name}? This will remove it from the marketplace list.`)
+    if (!confirmed) return
+    setDeletingAgentIds((current) => new Set(current).add(agent.id))
+    try {
+      await deleteAgent(agent.sellerId, agent.agentId)
+      await refreshAgents({ showLoading: false })
+      if (routeState?.agentId === agent.id) {
+        goBackToRegistry()
+      }
+    } catch (error) {
+      // Deletion errors should not replace the marketplace load state/banner.
+      // 404 commonly means backend not restarted or item already removed.
+      if (error?.status === 404) {
+        await refreshAgents({ showLoading: false })
+      } else {
+        window.alert(error?.message || "Could not delete agent.")
+      }
+    } finally {
+      setDeletingAgentIds((current) => {
+        const next = new Set(current)
+        next.delete(agent.id)
+        return next
+      })
     }
   }
 
@@ -1485,11 +1696,43 @@ export default function App() {
               </div>
             </button>
             <div className="hidden h-px flex-1 bg-gradient-to-r from-transparent via-zinc-800/80 to-transparent md:ml-10 md:block" />
+            <div className="ml-4 flex shrink-0 items-center gap-2">
+              <Button
+                variant="outline"
+                className={`h-8 rounded-md border-zinc-800 px-3 text-xs ${
+                  routeState?.page === "transactions"
+                    ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
+                    : "bg-zinc-950 text-zinc-200 hover:bg-zinc-900"
+                }`}
+                onClick={openTransactionsScreen}
+              >
+                <CandlestickChart className="size-3.5" />
+                Transactions
+              </Button>
+              <Button
+                variant="outline"
+                className={`h-8 rounded-md border-zinc-800 px-3 text-xs ${
+                  !routeState || routeState.page === "detail" || routeState.page === "edit" || routeState.page === "register"
+                    ? "bg-zinc-100 text-zinc-900 hover:bg-zinc-200"
+                    : "bg-zinc-950 text-zinc-200 hover:bg-zinc-900"
+                }`}
+                onClick={goBackToRegistry}
+              >
+                Registry
+              </Button>
+            </div>
           </div>
         </header>
 
         <div className="flex-1 px-4 py-5 lg:px-6">
-          {routeState?.page === "register" ? (
+          {routeState?.page === "transactions" ? (
+            <TransactionsScreen
+              transactionsState={transactionsState}
+              isLoading={isTransactionsLoading}
+              loadError={transactionsError}
+              onRefresh={() => refreshTransactions()}
+            />
+          ) : routeState?.page === "register" ? (
             <RegisterAgentScreen
               onBack={goBackToRegistry}
               onSubmit={registerAgent}
@@ -1539,6 +1782,8 @@ export default function App() {
               onPrevPage={() => setPage((current) => Math.max(current - 1, 1))}
               onNextPage={() => setPage((current) => Math.min(current + 1, pageCount))}
               onSelectPage={setPage}
+              onDelete={deleteAgentCard}
+              deletingAgentIds={deletingAgentIds}
             />
           )}
         </div>

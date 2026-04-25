@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -21,6 +22,8 @@ _raw_card_urls = os.getenv("AGENT_CARD_URLS", DEFAULT_AGENT_CARD_URL).strip()
 AGENT_CARD_URLS = [item.strip() for item in _raw_card_urls.split(",") if item.strip()]
 if not AGENT_CARD_URLS:
     AGENT_CARD_URLS = [DEFAULT_AGENT_CARD_URL]
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:4021").rstrip("/")
+DISCOVERY_MODE = os.getenv("DISCOVERY_MODE", "marketplace_first").strip().lower()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 BUYER_MODEL = os.getenv("BUYER_MODEL", "gpt-4o-mini").strip()
@@ -61,10 +64,50 @@ def _build_invoke_url(base: str, path: str | None) -> str:
 
 def _is_buy_intent(text: str) -> bool:
     lower = text.lower()
-    return any(token in lower for token in ("buy", "purchase", "invoke", "pay for", "find service", "discover"))
+    return any(
+        token in lower
+        for token in (
+            "buy",
+            "purchase",
+            "invoke",
+            "pay for",
+            "find service",
+            "discover",
+            "plan trip",
+            "book",
+            "multi-hop",
+            "workflow",
+            "chain",
+        )
+    )
 
 
-async def discover_services(timeout_seconds: float, default_price: Decimal) -> list[dict[str, Any]]:
+def _extract_service_tasks(user_text: str) -> list[str]:
+    lowered = user_text.strip()
+    normalized = re.sub(r"\s+", " ", lowered, flags=re.IGNORECASE)
+    split_patterns = [
+        r"\band then\b",
+        r"\bthen\b",
+        r"\balso\b",
+        r"\bafter that\b",
+        r"\bnext\b",
+    ]
+    for pattern in split_patterns:
+        normalized = re.sub(pattern, " || ", normalized, flags=re.IGNORECASE)
+    chunks = [part.strip(" .,!") for part in normalized.split("||") if part.strip(" .,!")]
+    if not chunks:
+        return [user_text]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in chunks:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+async def discover_services_from_cards(timeout_seconds: float, default_price: Decimal) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         for card_url in AGENT_CARD_URLS:
@@ -99,9 +142,42 @@ async def discover_services(timeout_seconds: float, default_price: Decimal) -> l
                         "invokeUrl": invoke_url,
                         "priceUSDC": float(price_usdc),
                         "cardUrl": card_url,
+                        "source": "agent_card",
                     }
                 )
     return candidates
+
+
+async def discover_services_from_marketplace(
+    prompt: str, timeout_seconds: float, remaining_budget: Decimal
+) -> list[dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        response = await client.post(
+            f"{SERVER_URL}/marketplace/discover",
+            json={
+                "prompt": prompt,
+                "budgetUSDC": float(remaining_budget),
+                "desiredTool": "auto",
+                "maxResults": 8,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    ranked = payload.get("candidates", [])
+    return [item.get("candidate", {}) for item in ranked if isinstance(item, dict) and item.get("candidate")]
+
+
+async def discover_services(
+    prompt: str, timeout_seconds: float, default_price: Decimal, remaining_budget: Decimal
+) -> list[dict[str, Any]]:
+    if DISCOVERY_MODE in {"marketplace_first", "marketplace"}:
+        try:
+            market = await discover_services_from_marketplace(prompt, timeout_seconds, remaining_budget)
+            if market:
+                return market
+        except Exception:
+            pass
+    return await discover_services_from_cards(timeout_seconds, default_price)
 
 
 async def buy_service(invoke_url: str, prompt: str, timeout_seconds: float) -> dict[str, Any]:
@@ -152,7 +228,10 @@ async def buy_service(invoke_url: str, prompt: str, timeout_seconds: float) -> d
             }
 
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        response = await client.post(invoke_url, json={"prompt": prompt})
+        body: dict[str, Any] = {"prompt": prompt}
+        if BUYER_ID.isdigit():
+            body["buyerId"] = int(BUYER_ID)
+        response = await client.post(invoke_url, json=body)
         response.raise_for_status()
         return {
             "paymentMode": "simulate",
@@ -204,39 +283,83 @@ class BuyerChatbot:
 
     async def handle_user_message(self, user_text: str) -> str:
         context_lines = [f"Remaining budget: {self.remaining_budget} USDC."]
-        purchase_result: dict[str, Any] | None = None
-        discovered: list[dict[str, Any]] = []
+        discovered_by_hop: list[dict[str, Any]] = []
+        purchase_hops: list[dict[str, Any]] = []
 
         if _is_buy_intent(user_text):
-            discovered = await discover_services(self.timeout_seconds, self.default_price)
-            affordable = [svc for svc in discovered if Decimal(str(svc["priceUSDC"])) <= self.remaining_budget]
-            if affordable:
-                selected = sorted(affordable, key=lambda item: Decimal(str(item["priceUSDC"])))[0]
-                price = Decimal(str(selected["priceUSDC"]))
-                response = await buy_service(str(selected["invokeUrl"]), user_text, self.timeout_seconds)
+            tasks = _extract_service_tasks(user_text)
+            for hop_index, task in enumerate(tasks, start=1):
+                discovered = await discover_services(
+                    task,
+                    self.timeout_seconds,
+                    self.default_price,
+                    self.remaining_budget,
+                )
+                affordable = [
+                    svc for svc in discovered if Decimal(str(svc.get("priceUSDC", self.default_price))) <= self.remaining_budget
+                ]
+                discovered_by_hop.append(
+                    {
+                        "hop": hop_index,
+                        "task": task,
+                        "discoveredCount": len(discovered),
+                        "topServices": discovered[:3],
+                    }
+                )
+                if not affordable:
+                    purchase_hops.append(
+                        {
+                            "hop": hop_index,
+                            "task": task,
+                            "status": "skipped",
+                            "reason": "No affordable discovered services",
+                            "remainingBudgetUSDC": float(self.remaining_budget),
+                        }
+                    )
+                    continue
+
+                selected = sorted(affordable, key=lambda item: Decimal(str(item.get("priceUSDC", self.default_price))))[0]
+                price = Decimal(str(selected.get("priceUSDC", self.default_price)))
+                invoke_url = selected.get("invokeUrl")
+                if not invoke_url and all(k in selected for k in ("seller", "agent", "toolId")):
+                    invoke_url = (
+                        f"{SERVER_URL}/sellers/{selected['seller']['id']}/agents/"
+                        f"{selected['agent']['id']}/tools/{selected['toolId']}/invoke"
+                    )
+                if not invoke_url:
+                    purchase_hops.append(
+                        {
+                            "hop": hop_index,
+                            "task": task,
+                            "status": "skipped",
+                            "reason": "Missing invoke URL",
+                            "remainingBudgetUSDC": float(self.remaining_budget),
+                        }
+                    )
+                    continue
+
+                response = await buy_service(str(invoke_url), task, self.timeout_seconds)
                 self.remaining_budget -= price
-                purchase_result = {
-                    "status": "purchased",
-                    "paymentMode": PAYMENT_MODE,
-                    "service": selected,
-                    "spentUSDC": float(price),
-                    "remainingBudgetUSDC": float(self.remaining_budget),
-                    "response": response,
-                }
-            else:
-                purchase_result = {
-                    "status": "skipped",
-                    "reason": "No affordable discovered services",
-                    "remainingBudgetUSDC": float(self.remaining_budget),
-                }
+                purchase_hops.append(
+                    {
+                        "hop": hop_index,
+                        "task": task,
+                        "status": "purchased",
+                        "paymentMode": PAYMENT_MODE,
+                        "service": selected,
+                        "spentUSDC": float(price),
+                        "remainingBudgetUSDC": float(self.remaining_budget),
+                        "response": response,
+                    }
+                )
 
             context_lines.append(
-                "Discovery result: "
+                "Multi-hop orchestration result: "
                 + json.dumps(
                     {
-                        "count": len(discovered),
-                        "services": discovered[:5],
-                        "purchaseResult": purchase_result,
+                        "requestedTasks": tasks,
+                        "hops": discovered_by_hop,
+                        "purchaseHops": purchase_hops,
                     },
                     ensure_ascii=True,
                 )

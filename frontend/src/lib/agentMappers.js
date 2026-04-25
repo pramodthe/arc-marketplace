@@ -21,6 +21,12 @@ function toTitleCase(value) {
     .join(" ")
 }
 
+function formatOfferingType(value) {
+  const normalized = String(value || "agent").toLowerCase()
+  if (normalized === "mcp_service") return "MCP Service"
+  return toTitleCase(normalized)
+}
+
 function initialsFromName(name) {
   return (
     name
@@ -60,8 +66,9 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
     const tools = entry.tools || []
     const minPrice = Number(commerce.minPriceUSDC || 0)
     const category = entry.category || "General"
+    const offeringType = entry.offeringType || "agent"
+    const protocolType = entry.protocolType || "http"
     const endpointHost = entry.endpointHost || "Endpoint unavailable"
-    const skillCount = tools.reduce((count, tool) => count + (tool.skills?.length || 0), 0)
     const tags = Array.from(
       new Set([category, ...tools.map((tool) => toTitleCase(tool.toolKey || tool.name || ""))].filter(Boolean)),
     )
@@ -76,10 +83,10 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
       wallet: seller.walletAddress || "Wallet pending",
       owner: seller.name || "Unknown seller",
       authority: seller.validatorWalletAddress || "Validator pending",
-      assetType: "Provider API",
+      assetType: `${formatOfferingType(offeringType)} (${String(protocolType).toUpperCase()})`,
       status: normalizeStatus(entry.status),
       description: entry.description || "No description provided.",
-      tags: tags.length ? tags : ["General"],
+      tags: Array.from(new Set([...(tags.length ? tags : ["General"]), formatOfferingType(offeringType), String(protocolType).toUpperCase()])),
       categoryBadges: [
         category.toUpperCase(),
         `${formatPrice(minPrice)} USDC`,
@@ -89,7 +96,6 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
       color: CARD_GRADIENTS[index % CARD_GRADIENTS.length],
       holdings: [{ amount: String(commerce.toolCount || tools.length), symbol: "TOOLS" }],
       toolCount: commerce.toolCount || tools.length,
-      skillCount,
       token: arc.agentId || "Pending Arc ID",
       paymentProtocol: commerce.paymentProtocol === "arc-usdc" ? "Arc USDC Settlement" : "x402 Pending",
       registries: ["Arc ERC-8004", "A2A Discovery", "Circle Wallets"],
@@ -101,6 +107,8 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
       tools,
       profile: {
         category,
+        offeringType,
+        protocolType,
         services: tools.length ? tools.map((tool) => tool.name) : [entry.name || "Provider endpoint"],
         apiBaseUrl: endpointHost,
         apiDocsUrl: entry.apiDocsUrl || "",

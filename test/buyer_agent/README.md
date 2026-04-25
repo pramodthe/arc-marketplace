@@ -57,6 +57,30 @@ The chatbot uses tool-calling with:
 
 Budget is decremented only after a successful purchase.
 
+## Travel multi-agent QA UI (interactive)
+
+This launches a separate QA web app with two pages:
+
+- `/chatbot`: run buyer prompts and trigger multi-hop purchases (hotel -> flight -> itinerary).
+- `/transactions-ui`: live-refresh ledger view to observe payment/output events while hops are running.
+
+The app automatically:
+
+- starts local travel provider agents from `test/travel_agents/` when needed
+- registers a buyer + travel sellers/agents in marketplace
+- persists created wallet and registration metadata to `test/buyer_agent/runtime/travel_agent_wallets.json`
+
+Run:
+
+```bash
+python travel_qa_app.py
+```
+
+Open:
+
+- `http://127.0.0.1:7070/chatbot`
+- `http://127.0.0.1:7070/transactions-ui`
+
 ## Payment modes
 
 Default mode is simulated HTTP invoke:

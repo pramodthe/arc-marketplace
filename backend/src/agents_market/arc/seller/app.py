@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import html
+import ipaddress
+import json
 import os
 import re
+import socket
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -12,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from json import JSONDecodeError
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import yaml
@@ -50,6 +53,7 @@ from agents_market.marketplace.repository import (
     create_usage_records,
     create_seller,
     create_validation_request,
+    delete_agent_for_seller,
     get_agent,
     get_buyer,
     get_seller,
@@ -60,12 +64,12 @@ from agents_market.marketplace.repository import (
     list_buyers,
     list_agents_for_marketplace,
     list_payment_events,
-    list_skills_for_tool,
     list_sellers,
     list_tools_for_marketplace,
     payment_summary,
     set_validation_response,
     update_agent_tool_prices,
+    update_seller_status,
     update_tool_pricing,
     upsert_gateway_account,
 )
@@ -75,10 +79,12 @@ load_backend_env()
 try:
     from circlekit import GatewayClient, create_gateway_middleware
     from circlekit.x402 import PaymentInfo
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency 'circlekit'. Install editable circle-titanoboa-sdk (see backend/README.md)."
-    ) from exc
+except ImportError:  # pragma: no cover
+    GatewayClient = None
+    create_gateway_middleware = None
+
+    class PaymentInfo:  # type: ignore[no-redef]
+        pass
 
 from circle.web3 import developer_controlled_wallets, utils
 
@@ -90,10 +96,16 @@ class SellerCreateBody(BaseModel):
     validatorWalletAddress: str = ""
 
 
+class SellerStatusUpdateBody(BaseModel):
+    status: str = Field(min_length=1, max_length=32)
+
+
 class AgentCreateBody(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = Field(min_length=1)
     category: str = Field(min_length=1, max_length=80, default="General")
+    offeringType: str = Field(default="agent")
+    protocolType: str = Field(default="http")
     endpointUrl: str = ""
     httpMethod: str = "POST"
     priceUSDC: float = Field(gt=0, le=0.01, default=0.01)
@@ -213,12 +225,93 @@ def _normalize_http_method(method: str) -> str:
     return normalized
 
 
+def _normalize_offering_type(value: str) -> str:
+    normalized = value.strip().lower()
+    allowed = {"agent", "skill", "mcp_service"}
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=400, detail="offeringType must be one of: agent, skill, mcp_service"
+        )
+    return normalized
+
+
+def _normalize_protocol_type(value: str) -> str:
+    normalized = value.strip().lower()
+    allowed = {"http", "mcp", "a2a"}
+    if normalized not in allowed:
+        raise HTTPException(status_code=400, detail="protocolType must be one of: http, mcp, a2a")
+    return normalized
+
+
 def _validate_http_url(value: str, *, field_name: str) -> str:
     text = value.strip()
     parsed = urlparse(text)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail=f"{field_name} must be an absolute http(s) URL")
     return text
+
+
+def _allow_private_provider_endpoints() -> bool:
+    return os.getenv("ALLOW_PRIVATE_PROVIDER_ENDPOINTS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_private_hostname(hostname: str) -> bool:
+    host = hostname.strip().strip("[]")
+    if not host:
+        return True
+    if host.lower() in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as exc:
+            raise HTTPException(status_code=400, detail=f"Could not resolve provider endpoint host: {host}") from exc
+        addresses = []
+        for info in infos:
+            address = info[4][0]
+            try:
+                addresses.append(ipaddress.ip_address(address))
+            except ValueError:
+                continue
+    if not addresses:
+        return True
+    return any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+        for address in addresses
+    )
+
+
+def _validate_provider_endpoint(value: str, *, field_name: str) -> tuple[str, dict[str, Any] | None]:
+    endpoint_url = _validate_http_url(value, field_name=field_name)
+    parsed = urlparse(endpoint_url)
+    is_private = _is_private_hostname(parsed.hostname or "")
+    if is_private and not _allow_private_provider_endpoints():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} resolves to a private or local network address. "
+                "Set ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true only for local demos."
+            ),
+        )
+    warning = None
+    if is_private:
+        warning = {
+            "code": "private_provider_endpoint_allowed",
+            "message": "Private provider endpoint allowed because ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true.",
+        }
+    return endpoint_url, warning
+
+
+def _provider_origin(endpoint_url: str) -> str:
+    parsed = urlparse(endpoint_url)
+    return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
 
 
 def _require_circle_arc_env() -> None:
@@ -376,6 +469,7 @@ def _ensure_buyer_arc_wallets(buyer: Any, db: Session) -> None:
 def _wallet_balances_payload(*, wallet_id: str | None, wallet_address: str) -> dict[str, Any]:
     balances = get_wallet_balances(wallet_address, wallet_id=wallet_id)
     return {
+        "status": "available",
         "walletId": wallet_id,
         "walletAddress": wallet_address,
         "usdcTokenAddress": ARC_TESTNET_USDC,
@@ -383,6 +477,33 @@ def _wallet_balances_payload(*, wallet_id: str | None, wallet_address: str) -> d
         "tokens": balances.get("tokens", []),
         "network": "arcTestnet",
     }
+
+
+def _safe_wallet_balances_payload(*, wallet_id: str | None, wallet_address: str) -> dict[str, Any]:
+    if not wallet_address.strip():
+        return {
+            "status": "unavailable",
+            "reason": "wallet_address_missing",
+            "walletId": wallet_id,
+            "walletAddress": wallet_address,
+            "usdcTokenAddress": ARC_TESTNET_USDC,
+            "usdc": None,
+            "tokens": [],
+            "network": "arcTestnet",
+        }
+    try:
+        return _wallet_balances_payload(wallet_id=wallet_id, wallet_address=wallet_address)
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "reason": str(exc),
+            "walletId": wallet_id,
+            "walletAddress": wallet_address,
+            "usdcTokenAddress": ARC_TESTNET_USDC,
+            "usdc": None,
+            "tokens": [],
+            "network": "arcTestnet",
+        }
 
 
 def _lookup_private_key_for_address(address: str) -> str | None:
@@ -428,6 +549,8 @@ def _agent_api_payload(agent: Any) -> dict[str, Any]:
         "metadataUri": agent.metadata_uri,
         "iconDataUrl": agent.icon_data_url,
         "category": agent.category,
+        "offeringType": agent.offering_type,
+        "protocolType": agent.protocol_type,
         "endpointUrl": agent.endpoint_url,
         "httpMethod": agent.http_method,
         "apiDocsUrl": agent.api_docs_url,
@@ -480,18 +603,11 @@ def _tool_api_payload(tool: Any, db: Session, *, fallback_agent: Any | None = No
         "runtimeUnit": tool.runtime_unit,
         "capabilityType": tool.capability_type,
         "category": tool.category,
+        "offeringType": fallback_agent.offering_type if fallback_agent is not None else "agent",
+        "protocolType": fallback_agent.protocol_type if fallback_agent is not None else "http",
         "endpointUrl": endpoint_url,
         "httpMethod": http_method,
-        "skills": [
-            {
-                "skillId": skill.id,
-                "skillKey": skill.skill_key,
-                "name": skill.name,
-                "description": skill.description,
-                "priceUSDC": skill.price_usdc,
-            }
-            for skill in list_skills_for_tool(db, tool.id)
-        ],
+        "skills": [],
     }
 
 
@@ -507,18 +623,23 @@ def _build_capabilities_payload(body: AgentCreateBody) -> list[dict[str, Any]]:
     if capabilities:
         payloads = []
         for capability in capabilities:
+            endpoint_url, endpoint_warning = _validate_provider_endpoint(
+                capability.endpointUrl,
+                field_name="capabilities.endpointUrl",
+            )
             payloads.append(
                 {
                     "toolKey": capability.toolKey.strip(),
                     "name": capability.name.strip(),
                     "description": capability.description.strip(),
                     "category": capability.category.strip(),
-                    "endpointUrl": _validate_http_url(capability.endpointUrl, field_name="capabilities.endpointUrl"),
+                    "endpointUrl": endpoint_url,
                     "httpMethod": _normalize_http_method(capability.httpMethod),
                     "priceUSDC": capability.priceUSDC,
                     "runtimePriceUSDC": capability.runtimePriceUSDC,
                     "runtimeUnit": _normalize_runtime_unit(capability.runtimeUnit),
                     "capabilityType": capability.capabilityType.strip() or "tool",
+                    "endpointWarning": endpoint_warning,
                     "skills": [
                         {
                             "skillKey": skill.skillKey.strip(),
@@ -532,18 +653,20 @@ def _build_capabilities_payload(body: AgentCreateBody) -> list[dict[str, Any]]:
             )
         return payloads
 
+    endpoint_url, endpoint_warning = _validate_provider_endpoint(body.endpointUrl, field_name="endpointUrl")
     return [
         {
             "toolKey": "invoke",
             "name": body.name.strip(),
             "description": body.description.strip(),
             "category": body.category.strip(),
-            "endpointUrl": _validate_http_url(body.endpointUrl, field_name="endpointUrl"),
+            "endpointUrl": endpoint_url,
             "httpMethod": _normalize_http_method(body.httpMethod),
             "priceUSDC": body.priceUSDC,
             "runtimePriceUSDC": 0,
             "runtimeUnit": "none",
             "capabilityType": "tool",
+            "endpointWarning": endpoint_warning,
             "skills": [],
         }
     ]
@@ -567,25 +690,8 @@ def _pricing_breakdown(tool: Any, selected_skill_keys: list[str], *, db: Session
     )
     total += tool_price
 
+    # Billable skill charging is disabled for now.
     matched_skills = []
-    selected = {item.strip().lower() for item in selected_skill_keys if item.strip()}
-    for skill in list_skills_for_tool(db, tool.id):
-        if skill.skill_key.lower() not in selected:
-            continue
-        price = Decimal(str(skill.price_usdc))
-        matched_skills.append(skill)
-        components.append(
-            {
-                "componentType": "skill",
-                "componentKey": skill.skill_key,
-                "componentName": skill.name,
-                "units": 1,
-                "unitPriceUSDC": float(price),
-                "subtotalUSDC": float(price),
-                "skillId": skill.id,
-            }
-        )
-        total += price
 
     runtime_price = Decimal(str(tool.runtime_price_usdc))
     if tool.runtime_unit == "per_request" and runtime_price > 0:
@@ -790,6 +896,7 @@ async def _forward_to_provider(
     billing_breakdown: list[dict[str, Any]],
 ) -> dict[str, Any]:
     endpoint_url = tool.endpoint_url or agent.endpoint_url
+    endpoint_url, _warning = _validate_provider_endpoint(endpoint_url, field_name="endpointUrl")
     payload = {
         "prompt": body.prompt,
         "buyerId": buyer_id,
@@ -849,7 +956,50 @@ async def _forward_to_provider(
     }
 
 
+async def _preflight_provider(endpoint_url: str) -> dict[str, Any]:
+    endpoint_url, endpoint_warning = _validate_provider_endpoint(endpoint_url, field_name="endpointUrl")
+    origin = _provider_origin(endpoint_url)
+    health_url = f"{origin}/health"
+    try:
+        async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+            response = await client.get(health_url)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Provider preflight failed",
+                "healthUrl": health_url,
+                "error": str(exc),
+            },
+        ) from exc
+
+    if response.status_code < 200 or response.status_code >= 300:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Provider preflight failed",
+                "healthUrl": health_url,
+                "providerStatus": response.status_code,
+                "providerPreview": response.text[:300],
+            },
+        )
+    return {
+        "status": "ok",
+        "healthUrl": health_url,
+        "providerStatus": response.status_code,
+        "endpointWarning": endpoint_warning,
+    }
+
+
 async def _ensure_gateway_middleware(app: FastAPI, seller_address: str):
+    if create_gateway_middleware is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "x402 Gateway support is unavailable because circlekit is not installed. "
+                "Restore circle-titanoboa-sdk or install circle-titanoboa-sdk[x402]."
+            ),
+        )
     middleware = app.state.gateway_by_seller.get(seller_address)
     if middleware is None:
         middleware = create_gateway_middleware(seller_address=seller_address, chain="arcTestnet")
@@ -865,6 +1015,8 @@ async def _process_payment(
     agent: Any,
     tool: Any,
     invoke_path: str,
+    total_amount_usdc: Decimal,
+    billing_breakdown: list[dict[str, Any]],
     buyer_id: int | None = None,
 ):
     payment_header = request.headers.get("Payment-Signature")
@@ -872,12 +1024,12 @@ async def _process_payment(
     result = await middleware.process_request(
         payment_header=payment_header,
         path=invoke_path,
-        price=_tool_price_string(tool.price_usdc),
+        price=_tool_price_string(float(total_amount_usdc)),
     )
 
     if isinstance(result, PaymentInfo):
         amount_usdc = Decimal(str(result.amount)) / Decimal("1000000")
-        create_payment_event(
+        event = create_payment_event(
             db,
             seller_id=seller.id,
             agent_id=agent.id,
@@ -889,18 +1041,21 @@ async def _process_payment(
             amount_usdc=float(amount_usdc),
             details={
                 "path": invoke_path,
-                "price": _tool_price_string(tool.price_usdc),
+                "price": f"{total_amount_usdc:.6f}",
                 "payer": result.payer,
                 "amountBaseUnits": str(result.amount),
                 "amountUSDC": f"{amount_usdc:.6f}",
                 "transaction": result.transaction,
+                "network": result.network,
+                "settlementMode": "x402_gateway",
+                "billingBreakdown": billing_breakdown,
                 "sellerId": seller.id,
                 "agentId": agent.id,
                 "toolId": tool.id,
                 "buyerId": buyer_id,
             },
         )
-        return result
+        return result, event
 
     create_payment_event(
         db,
@@ -914,8 +1069,10 @@ async def _process_payment(
         amount_usdc=0,
         details={
             "path": invoke_path,
-            "price": _tool_price_string(tool.price_usdc),
+            "price": f"{total_amount_usdc:.6f}",
             "httpStatus": result.get("status", 402),
+            "settlementMode": "x402_gateway",
+            "billingBreakdown": billing_breakdown,
             "sellerId": seller.id,
             "agentId": agent.id,
             "toolId": tool.id,
@@ -1026,6 +1183,7 @@ def _settle_onchain_payment(
             "amountUSDC": f"{total_amount_usdc:.6f}",
             "onchainTxHash": payment.tx_hash,
             "circleTransactionId": payment.tx_id,
+            "settlementMode": "buyer_wallet_transfer",
             "billingBreakdown": billing_breakdown,
             "sellerId": seller.id,
             "agentId": agent.id,
@@ -1039,7 +1197,50 @@ def _settle_onchain_payment(
         "circleTransactionId": payment.tx_id,
         "payer": buyer.wallet_address,
         "payee": seller.owner_wallet_address,
+        "settlementMode": "buyer_wallet_transfer",
     }
+
+
+def _record_provider_failed_event(
+    db: Session,
+    *,
+    seller: Any,
+    agent: Any,
+    tool: Any,
+    invoke_path: str,
+    buyer_address: str | None,
+    transaction_ref: str | None,
+    amount_usdc: Decimal,
+    billing_breakdown: list[dict[str, Any]],
+    provider_endpoint_url: str,
+    error: Any,
+    buyer_id: int | None,
+    settlement_mode: str,
+) -> None:
+    provider_host = ""
+    if provider_endpoint_url:
+        provider_host = urlparse(provider_endpoint_url).netloc
+    create_payment_event(
+        db,
+        seller_id=seller.id,
+        agent_id=agent.id,
+        tool_id=tool.id,
+        event_type="seller_output",
+        status="provider_failed",
+        buyer_address=buyer_address,
+        transaction_ref=transaction_ref,
+        amount_usdc=0,
+        details={
+            "path": invoke_path,
+            "amountUSDC": f"{amount_usdc:.6f}",
+            "providerEndpointHost": provider_host,
+            "error": str(error),
+            "transactionRef": transaction_ref,
+            "billingBreakdown": billing_breakdown,
+            "settlementMode": settlement_mode,
+            "buyerId": buyer_id,
+        },
+    )
 
 
 def _buyer_breakdown(events: list[PaymentEvent]) -> list[dict[str, Any]]:
@@ -1135,7 +1336,12 @@ def _serialize_payment_event(event: PaymentEvent) -> dict[str, Any]:
 def _transactions_html(payload: dict[str, Any]) -> str:
     event_rows = []
     for event in payload["events"]:
-        details = html.escape(str(event["details"]))
+        raw_details = event.get("details")
+        if isinstance(raw_details, (dict, list)):
+            details_text = json.dumps(raw_details, indent=2, sort_keys=True)
+        else:
+            details_text = str(raw_details)
+        details = html.escape(details_text)
         reference = event["gatewayReference"] or event["onchainTxHash"] or ""
         reference_html = html.escape(str(reference))
         if event["referenceType"] == "onchain" and event["onchainTxHash"]:
@@ -1184,10 +1390,19 @@ def _transactions_html(payload: dict[str, Any]) -> str:
       .metric .label {{ font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #71717a; }}
       .metric .value {{ margin-top: 8px; font-size: 24px; font-weight: 600; color: #fafafa; }}
       .panel {{ border: 1px solid #27272a; border-radius: 14px; background: #111113; overflow: hidden; margin-top: 18px; }}
-      table {{ width: 100%; border-collapse: collapse; }}
+      .table-wrap {{ overflow-x: auto; width: 100%; }}
+      table {{ width: 100%; min-width: 1320px; border-collapse: collapse; table-layout: fixed; }}
+      .buyers-table {{ min-width: 840px; }}
       th, td {{ padding: 12px 14px; text-align: left; vertical-align: top; border-top: 1px solid #27272a; font-size: 13px; }}
       th {{ color: #a1a1aa; background: #0f0f10; font-weight: 600; border-top: none; }}
-      pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; color: #d4d4d8; }}
+      td {{ overflow-wrap: anywhere; word-break: break-word; }}
+      .col-timestamp {{ width: 190px; }}
+      .col-event {{ width: 120px; }}
+      .col-status {{ width: 120px; }}
+      .col-reference-type {{ width: 140px; }}
+      .col-reference {{ width: 360px; }}
+      .col-details {{ width: 390px; }}
+      pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; color: #d4d4d8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
       code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
       .note {{ border-left: 3px solid #3b82f6; padding-left: 12px; margin: 16px 0 0; }}
     </style>
@@ -1205,36 +1420,40 @@ def _transactions_html(payload: dict[str, Any]) -> str:
       </div>
       <p class="note">Legacy rows may still show <code>gateway_reference</code> from the older x402-only flow. New on-chain settlement rows are labeled <code>onchain</code> and carry the actual transfer hash.</p>
       <section class="panel">
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp</th>
-              <th>Event</th>
-              <th>Status</th>
-              <th>Reference Type</th>
-              <th>Reference</th>
-              <th>Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(event_rows) if event_rows else '<tr><td colspan="6">No events recorded.</td></tr>'}
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-timestamp">Timestamp</th>
+                <th class="col-event">Event</th>
+                <th class="col-status">Status</th>
+                <th class="col-reference-type">Reference Type</th>
+                <th class="col-reference">Reference</th>
+                <th class="col-details">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(event_rows) if event_rows else '<tr><td colspan="6">No events recorded.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
       </section>
       <section class="panel">
-        <table>
-          <thead>
-            <tr>
-              <th>Buyer</th>
-              <th>Payments</th>
-              <th>Total Paid USDC</th>
-              <th>Last Reference</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(buyer_rows) if buyer_rows else '<tr><td colspan="4">No buyers recorded.</td></tr>'}
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="buyers-table">
+            <thead>
+              <tr>
+                <th>Buyer</th>
+                <th>Payments</th>
+                <th>Total Paid USDC</th>
+                <th>Last Reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(buyer_rows) if buyer_rows else '<tr><td colspan="4">No buyers recorded.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
       </section>
     </main>
   </body>
@@ -1311,7 +1530,7 @@ async def get_buyer_endpoint(buyer_id: int, db: Session = Depends(get_db)):
     invocations = list_buyer_invocations(db, buyer_id=buyer_id, limit=50)
     return {
         "buyer": _buyer_api_payload(buyer),
-        "balances": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
+        "balances": _safe_wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
         "invocations": [
             {
                 "id": i.id,
@@ -1357,7 +1576,7 @@ async def buyer_balances(buyer_id: int, db: Session = Depends(get_db)):
     if buyer is None:
         raise HTTPException(status_code=404, detail="Buyer not found")
     _ensure_buyer_arc_wallets(buyer, db)
-    return {"balances": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address)}
+    return {"balances": _safe_wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address)}
 
 
 @app.post("/sellers")
@@ -1377,6 +1596,24 @@ async def list_sellers_endpoint(db: Session = Depends(get_db)):
     return {"sellers": [_seller_api_payload(s) for s in list_sellers(db)]}
 
 
+@app.patch("/sellers/{seller_id}/status")
+async def update_seller_status_endpoint(
+    seller_id: int,
+    body: SellerStatusUpdateBody,
+    db: Session = Depends(get_db),
+):
+    status = body.status.strip().lower()
+    if status not in {"active", "inactive", "registration_failed"}:
+        raise HTTPException(
+            status_code=400,
+            detail="status must be one of: active, inactive, registration_failed",
+        )
+    seller = update_seller_status(db, seller_id=seller_id, status=status)
+    if seller is None:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    return {"seller": _seller_api_payload(seller)}
+
+
 @app.get("/sellers/{seller_id}")
 async def get_seller_endpoint(seller_id: int, db: Session = Depends(get_db)):
     seller = get_seller(db, seller_id)
@@ -1385,7 +1622,10 @@ async def get_seller_endpoint(seller_id: int, db: Session = Depends(get_db)):
     agents = list_agents(db, seller_id=seller_id)
     return {
         "seller": _seller_api_payload(seller),
-        "balances": _wallet_balances_payload(wallet_id=seller.owner_wallet_id, wallet_address=seller.owner_wallet_address),
+        "balances": _safe_wallet_balances_payload(
+            wallet_id=seller.owner_wallet_id,
+            wallet_address=seller.owner_wallet_address,
+        ),
         "agents": [
             {
                 **_agent_api_payload(a),
@@ -1402,9 +1642,16 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
     capabilities = _build_capabilities_payload(body)
+    endpoint_warnings = [
+        capability["endpointWarning"]
+        for capability in capabilities
+        if capability.get("endpointWarning") is not None
+    ]
     endpoint_url = capabilities[0]["endpointUrl"]
     api_docs_url = _validate_http_url(body.apiDocsUrl, field_name="apiDocsUrl") if body.apiDocsUrl.strip() else ""
     http_method = capabilities[0]["httpMethod"]
+    offering_type = _normalize_offering_type(body.offeringType)
+    protocol_type = _normalize_protocol_type(body.protocolType)
     _ensure_seller_arc_wallets(seller, db)
     try:
         registration = register_agent_identity(
@@ -1427,6 +1674,8 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         metadata_uri=body.metadataUri,
         icon_data_url=body.iconDataUrl,
         category=body.category.strip(),
+        offering_type=offering_type,
+        protocol_type=protocol_type,
         endpoint_url=endpoint_url,
         http_method=http_method,
         api_docs_url=api_docs_url,
@@ -1446,7 +1695,23 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         },
         "seller": _seller_api_payload(seller),
         "arc": {"txHash": registration.tx_hash, "agentId": registration.agent_id},
+        "warnings": endpoint_warnings,
     }
+
+
+@app.delete("/sellers/{seller_id}/agents/{agent_id}")
+async def delete_agent_endpoint(
+    seller_id: int,
+    agent_id: int,
+    db: Session = Depends(get_db),
+):
+    seller = get_seller(db, seller_id)
+    if seller is None:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    deletion = delete_agent_for_seller(db, seller_id=seller_id, agent_id=agent_id)
+    if deletion is None:
+        raise HTTPException(status_code=404, detail="Agent not found for seller")
+    return {**deletion, "agentId": agent_id, "sellerId": seller_id}
 
 
 @app.patch("/sellers/{seller_id}/agents/{agent_id}/pricing")
@@ -1509,7 +1774,7 @@ async def seller_balances(seller_id: int, db: Session = Depends(get_db)):
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
     _ensure_seller_arc_wallets(seller, db)
-    return {"balances": _wallet_balances_payload(wallet_id=seller.owner_wallet_id, wallet_address=seller.owner_wallet_address)}
+    return {"balances": _safe_wallet_balances_payload(wallet_id=seller.owner_wallet_id, wallet_address=seller.owner_wallet_address)}
 
 
 @app.get("/marketplace/tools")
@@ -1614,7 +1879,7 @@ async def agent_card(db: Session = Depends(get_db)):
         "capabilities": {"streaming": False, "stateHistory": True},
         "authentication": {
             "type": "buyer-id-or-x402",
-            "instructions": "Preferred: send buyerId for custodial on-chain settlement. x402 headers remain compatibility-only.",
+            "instructions": "Use buyerId for registered demo buyers or x402 Payment-Signature for external Gateway buyers.",
         },
         "skills": skills,
     }
@@ -1701,35 +1966,136 @@ async def invoke_tool(
         body.selectedSkills,
         db=db,
     )
+    endpoint_url = tool.endpoint_url or agent.endpoint_url
+
     if buyer is None:
-        payment_header = request.headers.get("Payment-Signature")
-        if payment_header:
-            paid = await _process_payment(
+        if not request.headers.get("Payment-Signature"):
+            return await _process_payment(
                 request,
                 db,
                 seller=seller,
                 agent=agent,
                 tool=tool,
                 invoke_path=invoke_path,
+                total_amount_usdc=total_amount_usdc,
+                billing_breakdown=billing_breakdown,
                 buyer_id=buyer_id,
             )
-            if isinstance(paid, JSONResponse):
-                return paid
-            raise HTTPException(
-                status_code=400,
-                detail="x402-only invokes are no longer the settlement source of truth; provide buyerId for on-chain settlement",
-            )
-        return _payment_required_response(
+
+        provider_preflight = await _preflight_provider(endpoint_url)
+        paid = await _process_payment(
             db=db,
+            request=request,
             seller=seller,
             agent=agent,
             tool=tool,
             invoke_path=invoke_path,
-            buyer_id=buyer_id,
             total_amount_usdc=total_amount_usdc,
             billing_breakdown=billing_breakdown,
+            buyer_id=buyer_id,
         )
+        if isinstance(paid, JSONResponse):
+            return paid
+        payment_info, payment_event = paid
+        x402_payment = {
+            "amountUSDC": f"{Decimal(str(payment_info.amount)) / Decimal('1000000'):.6f}",
+            "payer": payment_info.payer,
+            "payee": seller.owner_wallet_address,
+            "transaction": payment_info.transaction,
+            "network": payment_info.network,
+            "settlementMode": "x402_gateway",
+            "billingBreakdown": billing_breakdown,
+        }
+        try:
+            provider_result = await _forward_to_provider(
+                agent,
+                tool,
+                body,
+                buyer_id=buyer_id,
+                billing_breakdown=billing_breakdown,
+            )
+        except Exception as exc:
+            _record_provider_failed_event(
+                db,
+                seller=seller,
+                agent=agent,
+                tool=tool,
+                invoke_path=invoke_path,
+                buyer_address=payment_info.payer,
+                transaction_ref=payment_info.transaction,
+                amount_usdc=total_amount_usdc,
+                billing_breakdown=billing_breakdown,
+                provider_endpoint_url=endpoint_url,
+                error=exc,
+                buyer_id=buyer_id,
+                settlement_mode="x402_gateway",
+            )
+            raise
 
+        create_payment_event(
+            db,
+            seller_id=seller.id,
+            agent_id=agent.id,
+            tool_id=tool.id,
+            event_type="seller_output",
+            status="completed",
+            buyer_address=payment_info.payer,
+            transaction_ref=payment_info.transaction,
+            amount_usdc=0,
+            details={
+                "path": invoke_path,
+                "promptPreview": body.prompt[:120],
+                "responsePreview": provider_result["outputText"][:160],
+                "providerEndpointHost": urlparse(provider_result["endpointUrl"]).netloc,
+                "providerStatusCode": provider_result["statusCode"],
+                "transactionRef": payment_info.transaction,
+                "billingBreakdown": billing_breakdown,
+                "settlementMode": "x402_gateway",
+                "selectedSkills": [skill.skill_key for skill in matched_skills],
+                "buyerId": buyer_id,
+            },
+        )
+        create_usage_records(
+            db,
+            buyer_invocation_id=None,
+            payment_event_id=payment_event.id,
+            tool_id=tool.id,
+            usage_components=billing_breakdown,
+        )
+        response_body = {
+            "sellerId": seller.id,
+            "agentId": agent.id,
+            "toolId": tool.id,
+            "toolKey": tool.tool_key,
+            "prompt": body.prompt,
+            "outputText": provider_result["outputText"],
+            "providerResponse": provider_result["data"],
+            "payment": {
+                **x402_payment,
+                "x402": {
+                    "verified": payment_info.verified,
+                    "responseHeaders": payment_info.response_headers,
+                },
+            },
+            "providerPreflight": provider_preflight,
+            "provider": {
+                "endpointHost": urlparse(provider_result["endpointUrl"]).netloc,
+                "statusCode": provider_result["statusCode"],
+                "contentType": provider_result["contentType"],
+            },
+            "balances": {
+                "seller": _safe_wallet_balances_payload(
+                    wallet_id=seller.owner_wallet_id,
+                    wallet_address=seller.owner_wallet_address,
+                ),
+            },
+        }
+        response = JSONResponse(content=response_body)
+        for header_name, header_value in payment_info.response_headers.items():
+            response.headers[header_name] = header_value
+        return response
+
+    provider_preflight = await _preflight_provider(endpoint_url)
     try:
         payment_event, settled_payment = _settle_onchain_payment(
             db,
@@ -1758,17 +2124,37 @@ async def invoke_tool(
                 "buyerId": buyer.id,
                 "error": str(exc),
                 "billingBreakdown": billing_breakdown,
+                "settlementMode": "buyer_wallet_transfer",
             },
         )
         raise HTTPException(status_code=402, detail=f"On-chain payment failed: {exc}") from exc
 
-    provider_result = await _forward_to_provider(
-        agent,
-        tool,
-        body,
-        buyer_id=buyer_id,
-        billing_breakdown=billing_breakdown,
-    )
+    try:
+        provider_result = await _forward_to_provider(
+            agent,
+            tool,
+            body,
+            buyer_id=buyer_id,
+            billing_breakdown=billing_breakdown,
+        )
+    except Exception as exc:
+        _record_provider_failed_event(
+            db,
+            seller=seller,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            buyer_address=buyer.wallet_address,
+            transaction_ref=settled_payment["onchainTxHash"],
+            amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+            provider_endpoint_url=endpoint_url,
+            error=exc,
+            buyer_id=buyer_id,
+            settlement_mode="buyer_wallet_transfer",
+        )
+        raise
+
     create_payment_event(
         db,
         seller_id=seller.id,
@@ -1787,6 +2173,7 @@ async def invoke_tool(
             "providerStatusCode": provider_result["statusCode"],
             "onchainTxHash": settled_payment["onchainTxHash"],
             "billingBreakdown": billing_breakdown,
+            "settlementMode": "buyer_wallet_transfer",
             "selectedSkills": [skill.skill_key for skill in matched_skills],
             "buyerId": buyer_id,
         },
@@ -1826,16 +2213,18 @@ async def invoke_tool(
             "payee": settled_payment["payee"],
             "onchainTxHash": settled_payment["onchainTxHash"],
             "circleTransactionId": settled_payment["circleTransactionId"],
+            "settlementMode": settled_payment["settlementMode"],
             "billingBreakdown": billing_breakdown,
         },
+        "providerPreflight": provider_preflight,
         "provider": {
             "endpointHost": urlparse(provider_result["endpointUrl"]).netloc,
             "statusCode": provider_result["statusCode"],
             "contentType": provider_result["contentType"],
         },
         "balances": {
-            "buyer": _wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
-            "seller": _wallet_balances_payload(
+            "buyer": _safe_wallet_balances_payload(wallet_id=buyer.owner_wallet_id, wallet_address=buyer.wallet_address),
+            "seller": _safe_wallet_balances_payload(
                 wallet_id=seller.owner_wallet_id,
                 wallet_address=seller.owner_wallet_address,
             ),
@@ -2019,6 +2408,11 @@ async def arc_validation_respond(agent_id: int, body: ValidationResponseBody, db
 
 @app.post("/sellers/{seller_id}/gateway/deposit")
 async def gateway_deposit(seller_id: int, body: GatewayDepositBody, db: Session = Depends(get_db)):
+    if GatewayClient is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gateway treasury support is unavailable because circlekit is not installed.",
+        )
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
@@ -2072,6 +2466,11 @@ async def provision_circle_wallets(
 
 @app.get("/sellers/{seller_id}/gateway/balances")
 async def gateway_balances(seller_id: int, db: Session = Depends(get_db)):
+    if GatewayClient is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gateway treasury support is unavailable because circlekit is not installed.",
+        )
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
@@ -2100,6 +2499,11 @@ async def gateway_balances(seller_id: int, db: Session = Depends(get_db)):
 
 @app.get("/gateway/demo-treasury/balances")
 async def demo_treasury_balances():
+    if GatewayClient is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gateway treasury support is unavailable because circlekit is not installed.",
+        )
     private_key = _shared_demo_treasury_private_key()
     async with GatewayClient(chain=DEMO_TREASURY_CHAIN, private_key=private_key) as gateway:
         balances = await gateway.get_balances()

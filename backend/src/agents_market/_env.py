@@ -1,8 +1,9 @@
 """Load env from backend/.env and supplement with the workspace root .env when present."""
 
 from pathlib import Path
+import os
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 def load_backend_env() -> None:
@@ -17,6 +18,9 @@ def load_backend_env() -> None:
         loaded_any = True
     if workspace_env.is_file():
         load_dotenv(workspace_env, override=False)
+        for key, value in dotenv_values(workspace_env).items():
+            if value is not None and not os.getenv(key):
+                os.environ[key] = value
         loaded_any = True
     if not loaded_any:
         load_dotenv()
