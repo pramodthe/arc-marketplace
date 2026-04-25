@@ -10,6 +10,12 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
+from marketplace_sdk_bridge import (
+    buy_marketplace_via_sdk,
+    discover_marketplace_rows,
+    is_marketplace_invoke_url,
+)
+
 load_dotenv()
 
 RUN_MODE = os.getenv("RUN_MODE", "chat").strip().lower()
@@ -151,20 +157,14 @@ async def discover_services_from_cards(timeout_seconds: float, default_price: De
 async def discover_services_from_marketplace(
     prompt: str, timeout_seconds: float, remaining_budget: Decimal
 ) -> list[dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        response = await client.post(
-            f"{SERVER_URL}/marketplace/discover",
-            json={
-                "prompt": prompt,
-                "budgetUSDC": float(remaining_budget),
-                "desiredTool": "auto",
-                "maxResults": 8,
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-    ranked = payload.get("candidates", [])
-    return [item.get("candidate", {}) for item in ranked if isinstance(item, dict) and item.get("candidate")]
+    return await discover_marketplace_rows(
+        server_url=SERVER_URL,
+        buyer_id=BUYER_ID,
+        buyer_name=BUYER_NAME,
+        timeout_seconds=timeout_seconds,
+        prompt=prompt,
+        budget_usdc=remaining_budget,
+    )
 
 
 async def discover_services(
@@ -180,7 +180,26 @@ async def discover_services(
     return await discover_services_from_cards(timeout_seconds, default_price)
 
 
-async def buy_service(invoke_url: str, prompt: str, timeout_seconds: float) -> dict[str, Any]:
+async def buy_service(
+    invoke_url: str,
+    prompt: str,
+    timeout_seconds: float,
+    selected_service: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if PAYMENT_MODE in {"simulate", "onchain"} and is_marketplace_invoke_url(SERVER_URL, invoke_url):
+        service_row = dict(selected_service) if selected_service else {}
+        if not service_row.get("invokeUrl"):
+            service_row["invokeUrl"] = invoke_url
+        return await buy_marketplace_via_sdk(
+            server_url=SERVER_URL,
+            buyer_id=BUYER_ID,
+            buyer_name=BUYER_NAME,
+            timeout_seconds=timeout_seconds,
+            payment_mode=PAYMENT_MODE,
+            service_row=service_row,
+            prompt=prompt,
+        )
+
     if PAYMENT_MODE == "onchain":
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             buyer_id = BUYER_ID
@@ -338,7 +357,7 @@ class BuyerChatbot:
                     )
                     continue
 
-                response = await buy_service(str(invoke_url), task, self.timeout_seconds)
+                response = await buy_service(str(invoke_url), task, self.timeout_seconds, selected)
                 self.remaining_budget -= price
                 purchase_hops.append(
                     {

@@ -3,9 +3,9 @@
 Agentic chatbot that:
 
 - answers normal questions conversationally
-- discovers services from A2A agent cards when needed
+- discovers services via the marketplace API using [`BuyerMarketplaceSDK`](../../backend/src/agents_market/arc/buyer/sdk.py) (see [`marketplace_sdk_bridge.py`](marketplace_sdk_bridge.py)), or falls back to A2A agent cards from `AGENT_CARD_URLS` when discovery returns nothing
 - decides whether to buy based on remaining budget
-- executes purchase via discovered invoke URL (for Agent Alpha, `http://localhost:5051/invoke`)
+- executes purchase via the discovered invoke URL (marketplace `…/tools/{id}/invoke` or external agents such as `http://localhost:5051/invoke`)
 
 ## Setup
 
@@ -17,6 +17,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+### Importing `BuyerMarketplaceSDK` (required for `chatbot.py`)
+
+The chatbot imports the backend SDK (`agents_market.arc.buyer`). Pick one approach:
+
+**Lightweight (recommended):** add the backend source tree to `PYTHONPATH` so you do not need to install the full `agents-market` wheel (which pulls seller-only dependencies such as `circle-titanoboa-sdk`).
+
+From `test/buyer_agent` (requires **Python 3.10+** for `agents_market`, same as the backend):
+
+```bash
+export PYTHONPATH="${PWD}/../../backend/src"
+python3 chatbot.py
+```
+
+If your default `python3` is older than 3.10, run the chatbot with the backend toolchain:
+
+```bash
+cd ../../backend
+PYTHONPATH="src:../test/buyer_agent" uv run python ../test/buyer_agent/chatbot.py
+```
+
+**Alternative:** install the backend package in editable mode from `backend/` (same `uv sync` / `circle-titanoboa-sdk` path as the main app), then run `python3 chatbot.py` from `test/buyer_agent` without `PYTHONPATH`.
+
+`PAYMENT_MODE=x402` still uses the Gateway client in `chatbot.py`; the SDK covers marketplace HTTP discovery and `buyerId` invokes for `simulate` / `onchain` against marketplace URLs.
 
 Set your OpenAI key in `.env`:
 

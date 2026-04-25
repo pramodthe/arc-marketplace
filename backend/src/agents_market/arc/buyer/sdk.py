@@ -146,6 +146,10 @@ class BuyerMarketplaceSDK:
                 return tool, f"downgraded_to={tool.tool_key} (marketplace fallback)"
         return None, "insufficient_budget_for_any_tool"
 
+    def candidate_from_tool_dict(self, item: dict[str, Any]) -> ToolCandidate:
+        """Build a ToolCandidate from a marketplace discover row or tool listing dict."""
+        return self._to_candidate(item)
+
     async def invoke(
         self,
         *,
