@@ -1,0 +1,70 @@
+{
+  "agentId": "flight_booker_agent",
+  "tool": "flight_recommendation",
+  "samples": [
+    {
+      "name": "budget_round_trip_tokyo",
+      "request": {
+        "prompt": "Find a round-trip flight from SFO to NRT for 4 nights in May under 1100 USD with max one layover.",
+        "buyerId": 101,
+        "selectedSkills": [
+          "flight_recommendation"
+        ]
+      },
+      "expectedShape": {
+        "agent": "flight_booker_agent",
+        "result": {
+          "recommendation": "<text>"
+        }
+      }
+    },
+    {
+      "name": "time_optimized_red_eye",
+      "request": {
+        "prompt": "Suggest the fastest evening departure from SFO to Tokyo, return in 5 days, flexible +/-1 day.",
+        "buyerId": 204,
+        "selectedSkills": [
+          "flight_recommendation"
+        ]
+      },
+      "expectedShape": {
+        "agent": "flight_booker_agent",
+        "result": {
+          "recommendation": "<text>"
+        }
+      }
+    },
+    {
+      "name": "a2a_message_send",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "flight-qa-001",
+        "method": "message/send",
+        "params": {
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Recommend outbound and return flights for SFO to NRT for business travel next month."
+              }
+            ]
+          }
+        }
+      },
+      "expectedShape": {
+        "jsonrpc": "2.0",
+        "result": {
+          "message": {
+            "parts": [
+              {
+                "type": "text",
+                "text": "<text>"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

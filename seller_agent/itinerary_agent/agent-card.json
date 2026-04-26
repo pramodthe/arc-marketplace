@@ -1,0 +1,54 @@
+{
+  "name": "RouteCraft Itinerary Orchestrator",
+  "description": "Planning agent that composes day-by-day travel itineraries from constraints such as budget, pace, arrival/departure windows, and preferred activity mix.",
+  "url": "http://127.0.0.1:5055/a2a/message",
+  "preferredTransport": "JSONRPC",
+  "protocolVersion": "0.3.0",
+  "supportsAuthenticatedExtendedCard": false,
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "provider": {
+    "organization": "Arc Travel Seller Network",
+    "url": "http://localhost:5055"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "http://localhost:5055/docs",
+  "capabilities": {
+    "streaming": false,
+    "stateHistory": true
+  },
+  "authentication": {
+    "type": "x402-or-buyer-id",
+    "instructions": "Use marketplace buyerId settlement or x402 Payment-Signature when routed through paid marketplace invoke endpoints."
+  },
+  "id": "itinerary_writer_agent",
+  "endpoint": "http://localhost:5055/a2a/message",
+  "skills": [
+    {
+      "id": "itinerary_generation",
+      "name": "Constraint-Based Itinerary Generation",
+      "description": "Builds practical multi-day plans with pacing, neighborhood sequencing, transit-aware grouping, and fallback options for schedule changes.",
+      "tags": [
+        "travel",
+        "itinerary",
+        "trip-design",
+        "logistics",
+        "arc-marketplace",
+        "a2a"
+      ],
+      "examples": [
+        "Create a 4-day Tokyo itinerary with one major attraction and one food district per day.",
+        "Plan a relaxed family itinerary with minimal transfers and evening activities near the hotel."
+      ],
+      "inputModes": [
+        "application/json"
+      ],
+      "outputModes": [
+        "application/json"
+      ],
+      "x402PriceUSDC": 0.01,
+      "x402Network": "arcTestnet",
+      "category": "Travel"
+    }
+  ]
+}

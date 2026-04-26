@@ -1,0 +1,8 @@
+::1 - - [23/Apr/2026 12:56:23] "GET / HTTP/1.1" 200 -
+::1 - - [23/Apr/2026 12:56:23] "GET /styles.css HTTP/1.1" 200 -
+::1 - - [23/Apr/2026 12:56:23] "GET /main.js HTTP/1.1" 200 -
+::1 - - [23/Apr/2026 12:56:23] code 404, message File not found
+::1 - - [23/Apr/2026 12:56:23] "GET /favicon.ico HTTP/1.1" 404 -
+::1 - - [23/Apr/2026 12:59:27] "GET / HTTP/1.1" 304 -
+::1 - - [23/Apr/2026 12:59:27] "GET /styles.css HTTP/1.1" 304 -
+::1 - - [23/Apr/2026 12:59:27] "GET /main.js HTTP/1.1" 304 -

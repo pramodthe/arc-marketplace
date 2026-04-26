@@ -1,0 +1,70 @@
+{
+  "agentId": "hotel_finder_agent",
+  "tool": "hotel_recommendation",
+  "samples": [
+    {
+      "name": "tokyo_subway_friendly_stay",
+      "request": {
+        "prompt": "Suggest 3 hotel options in Tokyo for 4 nights under 700 USD total near major subway lines.",
+        "buyerId": 101,
+        "selectedSkills": [
+          "hotel_recommendation"
+        ]
+      },
+      "expectedShape": {
+        "agent": "hotel_finder_agent",
+        "result": {
+          "recommendation": "<text>"
+        }
+      }
+    },
+    {
+      "name": "business_traveler_shinjuku",
+      "request": {
+        "prompt": "Find business-friendly hotels in Shinjuku with flexible cancellation and late check-in.",
+        "buyerId": 204,
+        "selectedSkills": [
+          "hotel_recommendation"
+        ]
+      },
+      "expectedShape": {
+        "agent": "hotel_finder_agent",
+        "result": {
+          "recommendation": "<text>"
+        }
+      }
+    },
+    {
+      "name": "a2a_message_send",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "hotel-qa-001",
+        "method": "message/send",
+        "params": {
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Recommend a quiet hotel in Tokyo close to transit for a family with one child."
+              }
+            ]
+          }
+        }
+      },
+      "expectedShape": {
+        "jsonrpc": "2.0",
+        "result": {
+          "message": {
+            "parts": [
+              {
+                "type": "text",
+                "text": "<text>"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

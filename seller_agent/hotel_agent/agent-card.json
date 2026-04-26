@@ -1,0 +1,54 @@
+{
+  "name": "StayWise Hotel Intelligence Agent",
+  "description": "Hospitality-focused planning agent that recommends hotels by neighborhood fit, transit access, cancellation flexibility, and target spend range for trip execution workflows.",
+  "url": "http://127.0.0.1:5053/a2a/message",
+  "preferredTransport": "JSONRPC",
+  "protocolVersion": "0.3.0",
+  "supportsAuthenticatedExtendedCard": false,
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "provider": {
+    "organization": "Arc Travel Seller Network",
+    "url": "http://localhost:5053"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "http://localhost:5053/docs",
+  "capabilities": {
+    "streaming": false,
+    "stateHistory": true
+  },
+  "authentication": {
+    "type": "x402-or-buyer-id",
+    "instructions": "Use marketplace buyerId settlement or x402 Payment-Signature when routed through paid marketplace invoke endpoints."
+  },
+  "id": "hotel_finder_agent",
+  "endpoint": "http://localhost:5053/a2a/message",
+  "skills": [
+    {
+      "id": "hotel_recommendation",
+      "name": "Hotel Match and Justification",
+      "description": "Selects and explains hotel options using nightly budget, district preference, trip duration, and amenity priorities with clear booking trade-offs.",
+      "tags": [
+        "travel",
+        "hotels",
+        "accommodation",
+        "budget-planning",
+        "arc-marketplace",
+        "a2a"
+      ],
+      "examples": [
+        "Suggest 3 hotels in Tokyo for 4 nights under 700 USD total near major subway lines.",
+        "Find business-friendly hotels in Shinjuku with flexible cancellation and late check-in."
+      ],
+      "inputModes": [
+        "application/json"
+      ],
+      "outputModes": [
+        "application/json"
+      ],
+      "x402PriceUSDC": 0.01,
+      "x402Network": "arcTestnet",
+      "category": "Travel"
+    }
+  ]
+}

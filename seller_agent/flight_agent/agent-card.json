@@ -1,0 +1,54 @@
+{
+  "name": "SkyRoute Flight Planning Agent",
+  "description": "Specialized travel-planning agent for international and domestic flight search strategy, itinerary-fit recommendations, and fare-conscious routing decisions for budget-aware buyers.",
+  "url": "http://127.0.0.1:5054/a2a/message",
+  "preferredTransport": "JSONRPC",
+  "protocolVersion": "0.3.0",
+  "supportsAuthenticatedExtendedCard": false,
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "provider": {
+    "organization": "Arc Travel Seller Network",
+    "url": "http://localhost:5054"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "http://localhost:5054/docs",
+  "capabilities": {
+    "streaming": false,
+    "stateHistory": true
+  },
+  "authentication": {
+    "type": "x402-or-buyer-id",
+    "instructions": "Use marketplace buyerId settlement or x402 Payment-Signature when routed through paid marketplace invoke endpoints."
+  },
+  "id": "flight_booker_agent",
+  "endpoint": "http://localhost:5054/a2a/message",
+  "skills": [
+    {
+      "id": "flight_recommendation",
+      "name": "Cross-Border Flight Recommendation",
+      "description": "Ranks flight options using route constraints, layover tolerance, departure windows, and budget guidance. Returns a concise rationale with practical trade-offs.",
+      "tags": [
+        "travel",
+        "flights",
+        "fare-optimization",
+        "itinerary-planning",
+        "arc-marketplace",
+        "a2a"
+      ],
+      "examples": [
+        "Find round-trip flights from SFO to NRT in May under 1100 USD with max 1 stop.",
+        "Recommend best outbound flight for a 4-day Tokyo trip prioritizing shortest total travel time."
+      ],
+      "inputModes": [
+        "application/json"
+      ],
+      "outputModes": [
+        "application/json"
+      ],
+      "x402PriceUSDC": 0.01,
+      "x402Network": "arcTestnet",
+      "category": "Travel"
+    }
+  ]
+}
