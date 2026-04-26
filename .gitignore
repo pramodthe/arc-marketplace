@@ -59,7 +59,6 @@ frontend/.env
 frontend/.env.*
 
 # Databases / runtime artifacts
-*.db
 *.sqlite
 *.sqlite3
 *.log
