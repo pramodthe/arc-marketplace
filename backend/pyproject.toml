@@ -36,3 +36,8 @@ packages = ["src/agents_market"]
 
 [tool.uv.sources]
 circle-titanoboa-sdk = { path = "../../circle-titanoboa-sdk", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

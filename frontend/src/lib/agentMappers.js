@@ -8,13 +8,16 @@ const CARD_GRADIENTS = [
 ]
 
 function formatShortAddress(value) {
-  if (!value) return "Pending"
-  if (value.length <= 10) return value
-  return `${value.slice(0, 4)}...${value.slice(-4)}`
+  const text = value == null ? "" : String(value).trim()
+  if (!text) return "Pending"
+  if (text.length <= 10) return text
+  return `${text.slice(0, 4)}...${text.slice(-4)}`
 }
 
 function toTitleCase(value) {
-  return value
+  const text = value == null ? "" : String(value).trim()
+  if (!text) return ""
+  return text
     .split(/[-_ ]+/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -28,8 +31,10 @@ function formatOfferingType(value) {
 }
 
 function initialsFromName(name) {
+  const text = name == null ? "" : String(name).trim()
+  if (!text) return "AG"
   return (
-    name
+    text
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
@@ -39,11 +44,13 @@ function initialsFromName(name) {
 }
 
 function normalizeStatus(status) {
-  if (!status) return "Active"
-  const normalized = status.toLowerCase()
+  if (status == null || status === "") return "Active"
+  const normalized = String(status).toLowerCase()
   if (normalized === "created") return "Created"
   if (normalized === "draft") return "Draft"
+  if (normalized === "registering") return "Registering"
   if (normalized === "registered") return "Registered"
+  if (normalized === "deleted") return "Removed"
   if (normalized === "inactive") return "Inactive"
   return "Active"
 }
@@ -58,26 +65,42 @@ export function makeAgentCompositeId(sellerId, agentId) {
   return `${sellerId}:${agentId}`
 }
 
+export function resolveMarketplaceAgentIds(agent) {
+  const seller = agent.seller || {}
+  const sellerId = agent.sellerId ?? seller.id
+  const agentId = agent.agentId
+  const nSeller = sellerId != null ? Number(sellerId) : NaN
+  const nAgent = agentId != null ? Number(agentId) : NaN
+  return {
+    sellerId: Number.isFinite(nSeller) ? nSeller : NaN,
+    agentId: Number.isFinite(nAgent) ? nAgent : NaN,
+  }
+}
+
 export function mapMarketplaceAgentsToCards(marketplaceAgents) {
-  return marketplaceAgents.map((entry, index) => {
+  if (!Array.isArray(marketplaceAgents)) return []
+  return marketplaceAgents.filter(Boolean).map((entry, index) => {
     const seller = entry.seller || {}
     const commerce = entry.commerce || {}
     const arc = entry.arc || {}
-    const tools = entry.tools || []
+    const tools = Array.isArray(entry.tools) ? entry.tools : []
     const minPrice = Number(commerce.minPriceUSDC || 0)
-    const category = entry.category || "General"
-    const offeringType = entry.offeringType || "agent"
-    const protocolType = entry.protocolType || "http"
-    const endpointHost = entry.endpointHost || "Endpoint unavailable"
+    const category = String(entry.category || "General")
+    const offeringType = entry.offeringType ?? "agent"
+    const protocolType = entry.protocolType ?? "http"
+    const endpointHost = String(entry.endpointHost || "Endpoint unavailable")
     const tags = Array.from(
-      new Set([category, ...tools.map((tool) => toTitleCase(tool.toolKey || tool.name || ""))].filter(Boolean)),
+      new Set([category, ...tools.map((tool) => toTitleCase(tool?.toolKey || tool?.name || ""))].filter(Boolean)),
     )
 
+    const sellerId = entry.sellerId ?? seller.id
+    const agentId = entry.agentId
+
     return {
-      id: entry.id || makeAgentCompositeId(entry.sellerId, entry.agentId),
-      sellerId: entry.sellerId,
-      agentId: entry.agentId,
-      name: entry.name || "Unnamed Agent",
+      id: entry.id ?? (sellerId != null && agentId != null ? makeAgentCompositeId(sellerId, agentId) : `unknown-${index}`),
+      sellerId,
+      agentId,
+      name: entry.name != null && String(entry.name).trim() !== "" ? String(entry.name) : "Unnamed Agent",
       avatarImage: entry.iconDataUrl || "",
       shortAddress: arc.agentId ? `Arc #${arc.agentId}` : formatShortAddress(String(entry.agentId || "")),
       wallet: seller.walletAddress || "Wallet pending",
@@ -92,16 +115,22 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
         `${formatPrice(minPrice)} USDC`,
         arc.registered ? "ARC REGISTERED" : "ARC PENDING",
       ],
-      avatar: initialsFromName(entry.name || ""),
+      avatar: initialsFromName(entry.name != null ? String(entry.name) : ""),
       color: CARD_GRADIENTS[index % CARD_GRADIENTS.length],
       holdings: [{ amount: String(commerce.toolCount || tools.length), symbol: "TOOLS" }],
       toolCount: commerce.toolCount || tools.length,
       token: arc.agentId || "Pending Arc ID",
-      paymentProtocol: commerce.paymentProtocol === "arc-usdc" ? "Arc USDC Settlement" : "x402 Pending",
-      registries: ["Arc ERC-8004", "A2A Discovery", "Circle Wallets"],
+      paymentProtocol: "Arc + x402",
+      registries: ["Arc ERC-8004"],
       explorerLabel: "Copy Invoke URL",
       marketLabel: "Invoke Tool",
-      rawMetadata: JSON.stringify(entry, null, 2),
+      rawMetadata: (() => {
+        try {
+          return JSON.stringify(entry, null, 2)
+        } catch {
+          return "{}"
+        }
+      })(),
       editable: false,
       invokePath: tools[0]?.invokePath || "",
       tools,
@@ -109,18 +138,17 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
         category,
         offeringType,
         protocolType,
-        services: tools.length ? tools.map((tool) => tool.name) : [entry.name || "Provider endpoint"],
+        services: tools.length
+          ? tools.map((tool) => (tool?.name != null ? String(tool.name) : "Tool"))
+          : [entry.name != null ? String(entry.name) : "Provider endpoint"],
         apiBaseUrl: endpointHost,
         apiDocsUrl: entry.apiDocsUrl || "",
         endpointUrl: entry.endpointUrl || "",
         httpMethod: entry.httpMethod || "POST",
         healthStatus: entry.healthStatus || "unchecked",
-        pricingModel: commerce.pricingModel || "On-chain metered",
+        pricingModel: "On-chain metered",
         basePriceUsdc: formatPrice(minPrice),
-        trustSignals: [
-          arc.registered ? "Arc ERC-8004 registered" : "Arc registration pending",
-          commerce.paymentProtocol === "arc-usdc" ? "Real Arc USDC settlement" : "Payment pending",
-        ],
+        trustSignals: [arc.registered ? "Arc ERC-8004 registered" : "Arc registration pending"],
         arcAgentId: arc.agentId || "",
         identityTxHash: arc.identityTxHash || "",
         network: arc.network || "Arc Testnet",
@@ -132,8 +160,9 @@ export function mapMarketplaceAgentsToCards(marketplaceAgents) {
         endpointHost,
         seller.name,
         seller.walletAddress,
-        tools.map((tool) => tool.name).join(" "),
+        tools.map((tool) => (tool?.name != null ? String(tool.name) : "")).join(" "),
       ]
+        .map((part) => (part == null ? "" : String(part)))
         .join(" ")
         .toLowerCase(),
     }

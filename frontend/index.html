@@ -5,9 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>ARC-Agents</title>
+    <!-- Critical layout before Tailwind bundle (avoids blank strip if JS/CSS fails) -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        min-height: 100dvh;
+        background: #111111;
+        color: #fafafa;
+      }
+      #root {
+        min-height: 100%;
+        min-height: 100dvh;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <p style="margin: 0; padding: 1.25rem; font-family: system-ui, sans-serif; font-size: 14px; color: #a1a1aa">
+        Loading ARC-Agents…
+      </p>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
-  </html>
+</html>

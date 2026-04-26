@@ -6,20 +6,22 @@ Agents Market is a multi-seller agent marketplace demo focused on the Arc hackat
 - track usage and payment events for demo evidence.
 
 The repository has:
-- a Python backend for marketplace APIs, provider endpoint proxying, payment enforcement, Arc lifecycle flows, and CLI runners.
-- a React frontend wired to the backend marketplace agent contract.
+- a **Python/FastAPI** backend for marketplace APIs, provider HTTP proxying, payment enforcement (x402 and Arc USDC), ERC-8004 lifecycle hooks, SQLAlchemy persistence, and CLI entry points.
+- a **React (Vite)** frontend for browsing listings, registering agents, editing per-tool pricing, and viewing the payment ledger.
 
 ---
 
 ## What This App Implements
 
 ### Core implemented flows
-- **Marketplace CRUD + discovery**: create sellers/agents, list tools, and rank tools by prompt + budget.
-- **Paid invocation flow**: external buyers can pay via x402/Gateway; registered demo buyers can pay via buyerId-driven Arc USDC settlement.
-- **Ledgering**: payment and output events are persisted for transaction/frequency reporting.
-- **Arc lifecycle endpoints**: ERC-8004 style register/reputation/validation request/response flows.
-- **Wallet/gateway operations**: provision Circle developer-controlled wallets and operate a shared demo Gateway treasury for balance/deposit checks.
-- **CLI utilities**: buyer/seller client runs, deposit, keygen, registration, demo data seeding.
+- **Marketplace CRUD + discovery**: sellers, buyer records, agent listings (with `offeringType` / `protocolType`), tools and optional per-tool **skills**, ranked discovery via `POST /marketplace/discover`, and a legacy-shaped `GET /tools` catalog.
+- **Paid invocation flow**: external buyers use **[Circle Gateway Nanopayments](https://developers.circle.com/gateway/nanopayments)** (HTTP **402** + **`Payment-Signature`**, `circlekit` on **`arcTestnet`**). Registered demo buyers use **[Arc](https://developers.circle.com/arc)** **USDC** on **ARC-TESTNET** via JSON **`buyerId`** and Circle **developer-controlled** wallets (no x402 on that path). Successful invoke responses and **`GET /`** include a stable **`paymentRails`** object describing both rails.
+- **Provider safety**: outbound calls resolve provider hosts; **localhost/private IPs are rejected by default** (opt in with **`ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true`** for local Docker demos). After x402 payment, the seller **preflights** `{provider-origin}/health` before calling the provider invoke URL.
+- **Ledgering**: payment, usage, and seller-output events are stored for reporting; **`GET /transactions`** exposes JSON summaries and **`GET /transactions/view`** renders a simple HTML ledger.
+- **Arc lifecycle endpoints**: ERC-8004-style **register**, **reputation**, and **validation request/response** for marketplace **agents** (by global `agent_id`) and optional **buyer** Arc registration under **`POST /buyers/{buyer_id}/arc/register`**.
+- **Wallet / Gateway demo**: provision wallets, shared demo Gateway **deposit/balance** views (treasury key is **`SELLER_PRIVATE_KEY`** — hackathon-only pattern).
+- **Buyer integration**: in-process **`BuyerMarketplaceSDK`** (`backend/src/agents_market/arc/buyer/sdk.py`) for discover → pick → **`buyerId`** invoke; the **`arc-buyer`** CLI uses it. x402 remains the caller’s responsibility (e.g. `circlekit`).
+- **CLI utilities**: `arc-seller`, `arc-buyer`, `arc-client`, `arc-deposit`, `arc-keygen`, `arc-demo-marketplace`.
 
 ### Current limitations (important)
 - **Bridge transfer endpoint is an orchestration stub** (records queued transfer metadata; does not execute a full bridge route yet).
@@ -34,23 +36,23 @@ agents_market/
 ├── backend/
 │   ├── src/agents_market/
 │   │   ├── arc/
-│   │   │   ├── seller/          # FastAPI marketplace + payment-gated endpoints
-│   │   │   ├── buyer/           # Buyer runner logic
-│   │   │   ├── cli/             # CLI entry points (deposit, client, register, keygen, seed)
-│   │   │   ├── services/        # ERC-8004 integration helpers
-│   │   │   └── common/          # Shared tool catalog
-│   │   ├── marketplace/         # SQLAlchemy models + repository methods
-│   │   ├── db.py                # Engine/session wiring
-│   │   └── _env.py              # backend/.env loader
-│   ├── alembic/                 # DB migration config and versions
-│   ├── pyproject.toml
+│   │   │   ├── seller/          # FastAPI app (app.py) + arc-seller entry
+│   │   │   ├── buyer/           # BuyerMarketplaceSDK (sdk.py), arc-buyer runner (run.py)
+│   │   │   ├── cli/             # deposit, client, keygen, demo_marketplace, etc.
+│   │   │   ├── services/        # Arc USDC transfers, ERC-8004 helpers
+│   │   │   └── common/          # Shared tool catalog helpers
+│   │   ├── marketplace/         # ORM models + repository
+│   │   ├── db.py
+│   │   └── _env.py              # backend/.env + workspace-root .env for unset keys
+│   ├── alembic/versions/        # 0001–0007 (see backend/README.md for revision table)
+│   ├── pyproject.toml           # uv; dev dependency group includes pytest
 │   └── .env.example
-└── frontend/
-    ├── src/
-    │   ├── App.jsx              # Main UI shell
-    │   └── components/ui/       # Reusable UI primitives
-    └── package.json
+├── frontend/                    # Vite + React + Tailwind + Radix
+│   └── src/ (App.jsx, api/marketplaceClient.js, lib/agentMappers.js, components/ui/)
+└── circle_scripts/              # Optional Circle ops (e.g. entity secret registration)
 ```
+
+Longer API reference, `BuyerMarketplaceSDK` examples, and migration revision notes: [`backend/README.md`](backend/README.md).
 
 ---
 
@@ -66,8 +68,8 @@ agents_market/
 - **`pyyaml`**: YAML/OpenAPI related serialization support used by compatibility endpoints.
 
 ### Data layer
-- **`sqlalchemy`**: ORM and database models for sellers, agents, tools, payments, reputation, and transfers.
-- **`alembic`**: schema migrations (`0001_marketplace_schema.py`) to keep DB changes controlled.
+- **`sqlalchemy`**: ORM for sellers, buyers, agents, tools, skills, usage records, payment events, reputation, validation, bridge rows, and buyer invocations. Money fields use **`Numeric(18, 6)`** (revision **0007**).
+- **`alembic`**: versioned migrations under `backend/alembic/versions/` (apply with **`uv run alembic upgrade head`**).
 
 ### Arc/EVM and payments
 - **`circle-titanoboa-sdk[x402]`** (via local editable source): provides `circlekit` client/middleware used for x402 + Gateway payment flow.
@@ -99,7 +101,7 @@ agents_market/
 
 ## Environment Variables
 
-Use `backend/.env.example` as the source of truth. Key variables:
+Use `backend/.env.example` as the source of truth. If a **workspace-root** `.env` exists, keys that are **not** already set in the process environment are filled from it after `backend/.env` is loaded (see `_env.py`). Key variables:
 
 - **Payment + runtime**
   - `PRIVATE_KEY`: buyer wallet private key.
@@ -108,8 +110,8 @@ Use `backend/.env.example` as the source of truth. Key variables:
   - `ALLOW_PRIVATE_PROVIDER_ENDPOINTS`: set to `true` only for local demos that register `localhost` or private-network provider URLs.
 - **Database**
   - `DATABASE_URL` (default SQLite).
-- **Buyer behavior**
-  - `BUYER_PROMPT`, `BUYER_TASK`, `BUYER_BUDGET_USDC`, `BUYER_LOOP_SECONDS`.
+- **Buyer behavior** (`arc-buyer` / local demos)
+  - `BUYER_PROMPT`, `BUYER_TASK`, `BUYER_BUDGET_USDC`, `BUYER_LOOP_SECONDS`, optional `BUYER_ID` (existing `POST /buyers` id).
 - **Circle + Arc integration**
   - `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`.
   - `ARC_RPC_URL` (default Arc testnet RPC; mostly needed for Arc lifecycle/read endpoints).
@@ -153,6 +155,25 @@ From `frontend/`:
 ```bash
 npm install
 npm run dev
+```
+
+Point the UI at a non-default API host with **`VITE_API_BASE_URL`** (see `src/api/marketplaceClient.js`; default `http://localhost:4021`).
+
+**Client-side routes** (history API, no React Router package): marketplace grid at **`/`**; agent detail **`/agents/{compositeId}`**; edit pricing **`/agents/{compositeId}/edit`**; seller onboarding **`/agents/register`**; ledger **`/transactions`**.
+
+```bash
+npm run build   # production bundle
+```
+
+---
+
+## 3) Backend tests (optional)
+
+From `backend/` (dev dependency group includes **pytest**; add tests under `backend/tests/` as needed):
+
+```bash
+uv sync --group dev
+uv run pytest
 ```
 
 ---
@@ -219,7 +240,9 @@ curl -sX POST http://localhost:4021/sellers \
 
 ### Step 3: Create your agent record
 
-Register the developer-owned provider endpoint. This automatically provisions/reuses Circle wallets and registers the agent on Arc ERC-8004 before the listing becomes active.
+Register the developer-owned provider endpoint. The handler **reuses the seller’s Circle wallets**, runs **ERC-8004 registration** on Arc testnet, and returns **`warnings`** if the provider URL tripped SSRF rules (e.g. private IP without `ALLOW_PRIVATE_PROVIDER_ENDPOINTS`).
+
+Minimal listing (one auto-created **`invoke`** tool) — `offeringType` / `protocolType` classify the listing for discovery and the UI:
 
 ```bash
 curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
@@ -228,6 +251,8 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
     "name": "Arb Scout v1",
     "description": "Cross-chain opportunity analysis and execution plans",
     "category": "Analytics",
+    "offeringType": "agent",
+    "protocolType": "http",
     "endpointUrl": "https://your-agent-domain/api/invoke",
     "httpMethod": "POST",
     "priceUSDC": 0.01,
@@ -236,12 +261,18 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
   }'
 ```
 
+`offeringType`: `agent` | `skill` | `mcp_service`. `protocolType`: `http` | `mcp` | `a2a`.
+
+For **multiple paid tools** on one agent, send a **`capabilities`** array (each entry: `toolKey`, `endpointUrl`, `priceUSDC`, optional `skills`, optional `runtimePriceUSDC` / `runtimeUnit`) instead of relying on the single-endpoint shorthand above; see `AgentCreateBody` in `backend/src/agents_market/arc/seller/app.py`.
+
 ### Step 4: Verify your listing and paid invoke path
 
-- Check marketplace visibility: `GET /marketplace/agents`
-- Check tool compatibility: `GET /marketplace/tools`
-- Invoke route pattern: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke`
-- Check ledger events: `GET /transactions`
+- Marketplace cards: `GET /marketplace/agents`
+- Tools: `GET /marketplace/tools` or `GET /tools` (legacy-shaped rows with `invokeUrl`)
+- Ranked discovery: `POST /marketplace/discover`
+- Paid invoke: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` with either x402 headers or JSON **`buyerId`**
+- Invoke JSON may include **`usageUnits`** when the tool defines runtime metering (`runtimePriceUSDC` / `runtimeUnit`)
+- Ledger: `GET /transactions` or open **`/transactions`** in the frontend
 
 ### Current platform compatibility endpoint
 
@@ -251,47 +282,62 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
 
 ## API Highlights
 
-### Marketplace
-- `POST /sellers`
-- `GET /sellers`
-- `GET /sellers/{seller_id}`
-- `POST /sellers/{seller_id}/agents`
-- `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
-- `GET /marketplace/agents`
-- `GET /marketplace/tools`
-- `POST /marketplace/discover`
-- `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (payment-gated)
-- `GET /transactions`
+Routes match `backend/src/agents_market/arc/seller/app.py` (prefix-free paths on the seller server).
 
-### Arc lifecycle
+### Service
+- `GET /` — metadata + **`paymentRails`**
+- `GET /health` — counts + timestamp (also the default **provider preflight** path pattern: `{origin}/health`)
+
+### Sellers and listings
+- `POST /sellers`, `GET /sellers`, `GET /sellers/{seller_id}`
+- `PATCH /sellers/{seller_id}/status`
+- `GET /sellers/{seller_id}/balances`
+- `POST /sellers/{seller_id}/agents` (Arc register + tools)
+- `DELETE /sellers/{seller_id}/agents/{agent_id}`
+- `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
+- `PATCH /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/pricing`
+
+### Buyers
+- `POST /buyers`, `GET /buyers`, `GET /buyers/{buyer_id}` (includes recent invocations)
+- `GET /buyers/{buyer_id}/balances`
+- `POST /buyers/{buyer_id}/arc/register`
+
+### Marketplace and invoke
+- `GET /marketplace/agents`, `GET /marketplace/tools`, `POST /marketplace/discover`
+- `GET /tools` — legacy tool listing
+- `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` — x402 **or** `buyerId`
+
+### Ledger
+- `GET /transactions`
+- `GET /transactions/view` — HTML ledger
+
+### Arc lifecycle (global `agent_id` as stored in the DB)
 - `POST /agents/{agent_id}/arc/register`
 - `POST /agents/{agent_id}/arc/reputation`
 - `POST /agents/{agent_id}/arc/validation/request`
 - `POST /agents/{agent_id}/arc/validation/respond`
 
-### Wallet/Gateway/Bridge
+### Wallet / Gateway / bridge
 - `POST /sellers/{seller_id}/wallets/provision`
 - `POST /sellers/{seller_id}/gateway/deposit`
 - `GET /sellers/{seller_id}/gateway/balances`
 - `GET /gateway/demo-treasury/balances`
-- `POST /sellers/{seller_id}/bridge/transfers` (currently recorded as queued orchestration stub)
+- `POST /sellers/{seller_id}/bridge/transfers` — **stub** (persists intent; no live Bridge Kit execution)
 
-### Compatibility/discovery metadata
-- `GET /.well-known/agent-card.json`
-- `GET /.well-known/ai-plugin.json`
-- `GET /openapi.yaml`
+### Compatibility / docs
+- `GET /.well-known/agent-card.json`, `GET /.well-known/ai-plugin.json`, `GET /openapi.yaml`
 
 ---
 
 ## How Buyer/Seller Nanopayments Work (Current Implementation)
 
 1. Buyer discovers target tool and invoke path.
-2. Buyer uses Gateway client to call paid endpoint.
-3. Seller returns payment challenge when no valid payment signature is present.
-4. Buyer signs payment authorization and retries with payment header.
-5. Seller preflights the provider `/health` endpoint, then verifies and settles payment through Gateway middleware.
-6. Seller executes tool, returns response with x402 payment confirmation, and logs transaction/payment events.
-7. Registered demo buyers can alternatively send `buyerId`; the platform settles Arc USDC from the buyer wallet before invoking the provider.
+2. Buyer uses a Gateway/x402-capable client to call the paid invoke endpoint.
+3. On the **first** call without `Payment-Signature`, the seller returns **HTTP 402** with the Gateway payment challenge (no provider preflight yet).
+4. Buyer signs the payment authorization and **retries the same invoke URL** with the `Payment-Signature` header.
+5. On that **retry**, the seller preflights the provider at `{origin}/health`, then verifies and settles payment through Gateway middleware (`circlekit`, `arcTestnet`).
+6. Seller executes the provider tool, returns the response with x402 payment confirmation, and logs transaction/payment events.
+7. **Alternatively**, registered demo buyers send `buyerId` (no x402): the seller preflights `/health`, settles Arc USDC from the buyer wallet to the seller, then invokes the provider.
 
 This design is what enables per-action monetization and high-frequency transaction logging for hackathon evidence.
 
@@ -300,8 +346,9 @@ This design is what enables per-action monetization and high-frequency transacti
 ## Hackathon Payment Model
 
 - One Circle developer account (`CIRCLE_API_KEY` + `CIRCLE_ENTITY_SECRET`) provisions all demo seller, buyer, owner, and validator wallets.
-- Arc identity registration remains seller/agent-specific: each Arc-registered agent receives owner and validator wallets on `ARC-TESTNET`.
+- New **agent listings** register on Arc using the **seller’s** provisioned owner/validator wallet pair (`ARC-TESTNET`). **Buyers** can additionally register on Arc via **`POST /buyers/{buyer_id}/arc/register`** (separate owner/validator pair for the buyer record).
 - x402 paid invokes use the seller's `ownerWalletAddress` as the payment recipient in the Gateway payment challenge.
+- **`buyerId`** invokes settle **Arc USDC** from the buyer’s provisioned wallet to the **seller’s owner wallet** (then the provider is called).
 - Provider endpoint URLs that resolve to localhost or private networks are blocked by default. For Docker/local demos, set `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true`.
 - Gateway deposit and balance routes use `SELLER_PRIVATE_KEY` as a shared local demo treasury key. The seller-scoped Gateway endpoints are compatibility views that include seller context plus `mode: "shared_demo_treasury"`.
 - This is acceptable for hackathon evidence and local demos. Production custody should replace the shared private key with seller-specific treasury/accounting controls.
@@ -310,16 +357,17 @@ This design is what enables per-action monetization and high-frequency transacti
 
 ## Hackathon Alignment Snapshot
 
-- Arc + USDC + Circle nanopayment infrastructure: implemented.
-- Per-action low-cost priced tools: implemented.
-- Transaction event persistence for frequency reporting: implemented.
-- Bridge/liquidity advanced workflow execution: partially implemented (bridge endpoint currently stubbed).
-- End-to-end polished frontend integration: implemented for marketplace browsing, listing creation, and pricing updates.
+- Arc + USDC + Circle Gateway x402: implemented (dual rail: external x402 + internal `buyerId` Arc settlement).
+- Per-action priced tools (and optional per-skill selection metadata): implemented.
+- Usage / payment event persistence: implemented (JSON + HTML ledger).
+- Bridge endpoint: **stub only** (queued metadata, not a live cross-chain transfer).
+- Frontend: marketplace browse, agent detail, **register** flow, **per-tool pricing** edits, **delete agent**, transactions view.
 
 ---
 
 ## Notes for Contributors
 
-- Do not commit real private keys or `.env`.
-- If `circle-titanoboa-sdk` is in a different local path, update `backend/pyproject.toml` under `[tool.uv.sources]`.
-- Run migrations before first API boot to avoid schema mismatches.
+- Do not commit real private keys or `.env` files.
+- If `circle-titanoboa-sdk` lives outside the default sibling path, update `[tool.uv.sources]` in `backend/pyproject.toml`.
+- Run **`uv run alembic upgrade head`** before first API boot whenever the schema changes.
+- Backend-focused conventions: [`backend/AGENTS.md`](backend/AGENTS.md); operational detail: [`backend/README.md`](backend/README.md).

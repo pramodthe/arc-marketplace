@@ -1,0 +1,11 @@
+{
+  "name": "agents-market-workspace",
+  "private": true,
+  "description": "Run npm from repo root; app package is frontend/. Custom port: npm run dev -- --port 3000 (trailing -- forwards to Vite).",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev --",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "lint": "npm --prefix frontend run lint"
+  }
+}

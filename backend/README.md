@@ -4,19 +4,20 @@ Multi-seller Arc marketplace backend for hackathon demos:
 
 - FastAPI service under `src/agents_market/arc/seller/app.py`
 - Seller/agent/tool persistence with SQLAlchemy + Alembic
-- x402 nanopayment execution using Circle Gateway (`circlekit`) for external buyers
-- buyerId-driven Arc USDC settlement for registered demo buyers
+- [Circle Gateway Nanopayments](https://developers.circle.com/gateway/nanopayments): x402 via `circlekit` (`arcTestnet`) for external buyers
+- [Arc](https://developers.circle.com/arc) USDC on ARC-TESTNET for registered buyers (`buyerId` + Circle developer-controlled wallets)
+- `GET /` and successful `.../invoke` responses include `paymentRails` metadata linking both rails for integrations and demos
 - Arc ERC-8004 identity/reputation/validation service endpoints
-- Gateway demo treasury and Bridge Kit workflow endpoints (bridge orchestration stub + records)
+- Gateway demo treasury and `POST .../bridge/transfers` (persists a transfer row; orchestration is a hackathon stub, not live Bridge Kit execution)
 
 ## Project layout
 
 - `src/agents_market/arc/seller/` - marketplace API
-- `src/agents_market/arc/buyer/` - buyer runner that pays marketplace tools
-- `src/agents_market/arc/cli/` - CLI utilities (deposit/register/client/keygen)
+- `src/agents_market/arc/buyer/` - `BuyerMarketplaceSDK` client, `arc-buyer` runner, and related helpers
+- `src/agents_market/arc/cli/` - CLI utilities (deposit, client, keygen, demo marketplace seed, and related helpers)
 - `src/agents_market/arc/services/` - reusable Arc ERC-8004 integrations
 - `src/agents_market/marketplace/` - DB models and repository helpers
-- `alembic/` - migration config and initial schema migration
+- `alembic/` - Alembic config; versioned revisions under `alembic/versions/` (see Alembic section below)
 - `src/agents_market/arc/cli/demo_marketplace.py` - seed 10 sellers + agents for demo
 
 ## Setup
@@ -41,6 +42,15 @@ uv run arc-seller
 ```
 
 Base URL defaults to `http://localhost:4021`.
+
+## QA and smoke validation
+
+```bash
+# QA-only suites are maintained under ../QA_test (do not modify during backend cleanup).
+# For deployment checks, run backend + frontend smoke flows:
+uv run arc-seller
+# then verify /health, /marketplace/agents, paid invoke paths, and /transactions
+```
 
 ## Seller onboarding flow (create and sell an agent service)
 
@@ -136,7 +146,8 @@ Paid invokes support two settlement modes:
 
 Notes:
 - Each MVP provider listing creates one paid `invoke` tool backed by the developer's endpoint URL.
-- Provider endpoints are preflighted at `{origin}/health` before payment settlement. Endpoints resolving to localhost/private networks are blocked unless `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true` is set for local demos.
+- **x402:** the first unpaid request returns **402** only; after the client retries with `Payment-Signature`, the seller preflights `{origin}/health`, then verifies payment. **`buyerId`:** preflight runs before Arc USDC settlement and provider invoke.
+- Endpoints resolving to localhost/private networks are blocked unless `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true` is set for local demos.
 - If you want Circle dev-controlled wallets provisioned by the platform, call `POST /sellers/{seller_id}/wallets/provision`. All demo wallets are created under the same Circle developer account.
 - For external interoperability, publish your own `/.well-known/agent-card.json`, `/.well-known/ai-plugin.json`, and `/openapi.yaml`.
 - The backend `GET /.well-known/agent-card.json` is currently a marketplace-level aggregated compatibility document.
@@ -179,20 +190,43 @@ curl -sX POST http://localhost:4021/buyers/<BUYER_ID>/arc/register \
 
 ## Core API (MVP)
 
+Service:
+
+- `GET /` — API metadata
+- `GET /health` — liveness (also used as the default provider preflight target under `{origin}/health`)
+
+Sellers and listings:
+
 - `POST /sellers`
 - `GET /sellers`
 - `GET /sellers/{seller_id}`
+- `PATCH /sellers/{seller_id}/status`
+- `GET /sellers/{seller_id}/balances`
 - `POST /sellers/{seller_id}/agents`
+- `DELETE /sellers/{seller_id}/agents/{agent_id}`
 - `PATCH /sellers/{seller_id}/agents/{agent_id}/pricing`
+- `PATCH /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/pricing`
+
+Buyers:
+
 - `POST /buyers`
 - `GET /buyers`
 - `GET /buyers/{buyer_id}`
+- `GET /buyers/{buyer_id}/balances`
 - `POST /buyers/{buyer_id}/arc/register`
+
+Marketplace and tools:
+
 - `GET /marketplace/agents`
 - `GET /marketplace/tools`
+- `GET /tools` — legacy-shaped tool listing (invoke path, price string, seller/agent names)
 - `POST /marketplace/discover` (autonomous ranked discovery by prompt+budget)
-- `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (x402 paid)
+- `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` (paid invoke; x402 or `buyerId`)
+
+Ledger:
+
 - `GET /transactions`
+- `GET /transactions/view` — HTML ledger view
 
 External discovery compatibility:
 
@@ -224,9 +258,24 @@ Wallet/treasury:
 - `uv run arc-keygen` - generate demo keypairs
 - `uv run arc-demo-marketplace` - seed or verify 10 sellers and agents (`DEMO_AGENT_METADATA_URI` optional)
 
-## Buyer SDK (integration wrapper)
+## Buyer SDK (`BuyerMarketplaceSDK`)
 
-For external buyer agents, use `BuyerMarketplaceSDK` instead of re-implementing discovery + invoke logic.
+Use [`src/agents_market/arc/buyer/sdk.py`](src/agents_market/arc/buyer/sdk.py) instead of re-implementing discovery, buyer registration, and invoke URL handling. The public entry point is `agents_market.arc.buyer` (re-exports `BuyerMarketplaceSDK`, `BuyerProfile`, `ToolCandidate`).
+
+**What it covers**
+
+- `ensure_buyer()` / `POST /buyers` when you omit `buyer_id` and call `invoke(..., include_buyer_id=True)`.
+- `discover()` → `POST /marketplace/discover` returning `ToolCandidate` rows (absolute `invoke_url`, skills metadata).
+- `list_tools()` → `GET /marketplace/tools` as a fallback catalog.
+- `pick_best(...)` for budget- and task-aware selection (same heuristics as `uv run arc-buyer`).
+- `invoke()` → `POST` to the tool’s invoke URL with JSON `prompt`, `selectedSkills`, and optional `buyerId` for registered Arc USDC settlement.
+- `candidate_from_tool_dict(item)` builds a `ToolCandidate` from a discover/tool-listing dict (e.g. when your agent already picked a row and only needs to invoke).
+
+**What it does not cover**
+
+- x402 / `402` + `Payment-Signature` flows stay in your agent or in `circlekit`; the SDK only sends a plain JSON body.
+
+### Example (async)
 
 ```python
 from decimal import Decimal
@@ -239,7 +288,7 @@ async def main() -> None:
     sdk = BuyerMarketplaceSDK(
         server_url="http://localhost:4021",
         buyer_name="My Buyer Agent",
-        # optional: buyer_id=123 to reuse existing buyer
+        # optional: buyer_id=123 to reuse an existing buyer from POST /buyers
     )
     candidates = await sdk.discover(
         prompt="Find me a concise market summary.",
@@ -247,24 +296,51 @@ async def main() -> None:
         desired_tool="auto",
         max_results=5,
     )
-    tool = candidates[0]
+    marketplace_tools = await sdk.list_tools()
+    desired = sdk.desired_tool_from_prompt(task="auto", prompt="Find me a concise market summary.")
+    tool, reason = sdk.pick_best(
+        desired_tool=desired,
+        budget_usdc=Decimal("0.01"),
+        candidates=candidates,
+        fallback_tools=marketplace_tools,
+    )
+    if tool is None:
+        print("no tool:", reason)
+        return
     result = await sdk.invoke(
         candidate=tool,
         prompt="Give me today's top 3 insights.",
         selected_skills=tool.first_skill_keys(limit=1),
         include_buyer_id=True,
     )
-    print(result["outputText"])
+    print(result.get("outputText"))
 
 
 asyncio.run(main())
 ```
 
-The SDK normalizes candidate URLs, auto-registers buyer identity when needed, and supports budget-aware tool selection with `pick_best(...)`.
+### Using the SDK from another repo or a lightweight venv
+
+If you depend on this package via `pip install -e .` / `uv sync` from `backend/`, imports work as above.
+
+If you only want **source access** without installing the full backend wheel (which pulls `circle-titanoboa-sdk` and other seller dependencies), point `PYTHONPATH` at `backend/src` and install **`httpx`** in that environment; then `from agents_market.arc.buyer import BuyerMarketplaceSDK` resolves. Your agent code is responsible for any extra deps (e.g. LangChain, Google ADK, `circlekit` for x402).
+
+### In-repo demo: test buyer chatbot
+
+The interactive QA buyer under [`../QA_test/buyer_agent/`](../QA_test/buyer_agent/) uses the same SDK for marketplace discovery and for `simulate` / `onchain` invokes against marketplace URLs. The built-in CLI buyer (`uv run arc-buyer`, [`src/agents_market/arc/buyer/run.py`](src/agents_market/arc/buyer/run.py)) also uses `BuyerMarketplaceSDK` directly.
 
 ## Alembic migrations
 
-Initial migration exists at `alembic/versions/0001_marketplace_schema.py`.
+Schema is evolved through multiple revisions under `alembic/versions/` (apply all with `upgrade head`). Current files, in order:
+
+| Revision | File | Purpose (summary) |
+| --- | --- | --- |
+| `0001` | `0001_marketplace_schema.py` | Initial marketplace schema |
+| `0002` | `0002_buyer_tables.py` | Buyer tables |
+| `0003` | `0003_agent_icon_data_url.py` | Agent `icon_data_url` column |
+| `0004` | `0004_provider_listing_fields.py` | Provider listing columns on `agents` (category, endpoint, health, etc.) |
+| `0005` | `0005_onchain_capabilities.py` | Tool capability columns; `skills` and `usage_records` tables |
+| `0006` | `0006_agent_offering_protocol.py` | Agent `offering_type` and `protocol_type` columns |
 
 Example commands:
 
@@ -272,3 +348,22 @@ Example commands:
 uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "message"
 ```
+
+## Deployment smoke checklist
+
+Use this checklist before each deployment (SQLite and Arc testnet demo mode):
+
+1. Start backend and confirm liveness:
+   - `uv run arc-seller`
+   - `GET /health` returns `status=ok`.
+2. Seller onboarding:
+   - `POST /sellers`
+   - `POST /sellers/{seller_id}/agents` with capability endpoint + pricing.
+3. Buyer SDK readiness:
+   - Run `uv run arc-buyer` or a custom script using `BuyerMarketplaceSDK.discover()` and `invoke()`.
+4. Payment rails:
+   - x402 path: first invoke without `Payment-Signature` returns HTTP 402, retry with signature succeeds.
+   - buyerId path: invoke with registered `buyerId` settles Arc USDC and returns output.
+5. Ledger and UI:
+   - `GET /transactions` includes payment + seller_output rows.
+   - frontend loads from backend APIs only (`/marketplace/agents`, `/transactions`) and `npm run build` succeeds.

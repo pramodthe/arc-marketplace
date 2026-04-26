@@ -14,6 +14,7 @@ from eth_account import Account
 from web3 import Web3
 
 ARC_TESTNET = "ARC-TESTNET"
+ARC_TESTNET_CHAIN_ID = 5042002
 ARC_TESTNET_USDC = "0x3600000000000000000000000000000000000000"
 ARC_RPC_URL = "https://rpc.testnet.arc.network"
 USDC_DECIMALS = Decimal("1000000")
@@ -56,7 +57,14 @@ def _normalize_tx_hash(tx_hash: str) -> str:
 
 
 def _web3() -> Web3:
-    return Web3(Web3.HTTPProvider(os.getenv("ARC_RPC_URL", ARC_RPC_URL)))
+    web3 = Web3(Web3.HTTPProvider(os.getenv("ARC_RPC_URL", ARC_RPC_URL)))
+    chain_id = int(web3.eth.chain_id)
+    if chain_id != ARC_TESTNET_CHAIN_ID:
+        raise RuntimeError(
+            f"ARC RPC chain mismatch: expected {ARC_TESTNET_CHAIN_ID}, got {chain_id}. "
+            "Refusing to continue to avoid wrong-network transfers."
+        )
+    return web3
 
 
 def _required_env(name: str) -> str:
@@ -148,6 +156,7 @@ def transfer_usdc_from_private_key(
     amount_usdc: Decimal,
     ref_id: str,
 ) -> OnchainPaymentResult:
+    """Local / non-custodial fallback: raw ERC-20 transfer on Arc. Prefer ``transfer_usdc`` with a Circle wallet id."""
     web3 = _web3()
     account = Account.from_key(private_key)
     source_address = Web3.to_checksum_address(source_wallet_address)
@@ -178,6 +187,21 @@ def transfer_usdc_from_private_key(
         source_wallet_address=source_wallet_address,
         destination_wallet_address=destination_address,
     )
+
+
+def assert_sufficient_usdc_balance(wallet_address: str, minimum_usdc: Decimal) -> Decimal:
+    """Raise RuntimeError with a clear funding message if on-chain USDC is below ``minimum_usdc``."""
+    if not (wallet_address or "").strip():
+        raise RuntimeError("Wallet address is missing; cannot check USDC balance.")
+    balances = get_wallet_balances(wallet_address.strip(), wallet_id=None)
+    usdc = Decimal(str(balances.get("usdc", "0")))
+    need = minimum_usdc.quantize(Decimal("0.000001"))
+    if usdc < need:
+        raise RuntimeError(
+            f"Insufficient Arc testnet USDC: balance {usdc} < required {need}. "
+            f"Fund this buyer wallet on ARC-TESTNET (USDC contract {ARC_TESTNET_USDC}): {wallet_address.strip()}"
+        )
+    return usdc
 
 
 def get_wallet_balances(wallet_address: str, wallet_id: str | None = None) -> dict[str, Any]:

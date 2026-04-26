@@ -265,7 +265,9 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     for tool, agent, seller in rows:
-        starting_price = float(tool.price_usdc) + float(tool.runtime_price_usdc)
+        tool_price = float(tool.price_usdc)
+        runtime_price = float(tool.runtime_price_usdc)
+        starting_price = tool_price + runtime_price
         result.append(
             {
                 "toolId": tool.id,
@@ -273,8 +275,10 @@ def list_tools_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "slug": tool.slug,
                 "name": tool.name,
                 "description": tool.description,
+                "toolPriceUSDC": tool_price,
+                "runtimePriceUSDC": runtime_price,
                 "priceUSDC": starting_price,
-                "runtimePriceUSDC": tool.runtime_price_usdc,
+                "totalPriceUSDC": starting_price,
                 "runtimeUnit": tool.runtime_unit,
                 "capabilityType": tool.capability_type,
                 "category": tool.category,
@@ -332,8 +336,10 @@ def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 "slug": tool.slug,
                 "name": tool.name,
                 "description": tool.description,
+                "toolPriceUSDC": float(tool.price_usdc),
+                "runtimePriceUSDC": float(tool.runtime_price_usdc),
                 "priceUSDC": float(tool.price_usdc) + float(tool.runtime_price_usdc),
-                "runtimePriceUSDC": tool.runtime_price_usdc,
+                "totalPriceUSDC": float(tool.price_usdc) + float(tool.runtime_price_usdc),
                 "runtimeUnit": tool.runtime_unit,
                 "capabilityType": tool.capability_type,
                 "category": tool.category,
@@ -352,7 +358,7 @@ def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
                 break
         cards.append(
             {
-                "id": f"{seller.id}:{agent.id}",
+                "id": agent.id,
                 "sellerId": seller.id,
                 "agentId": agent.id,
                 "name": agent.name,
@@ -386,9 +392,6 @@ def list_agents_for_marketplace(db: Session) -> list[dict[str, Any]]:
                     "status": seller.status,
                 },
                 "commerce": {
-                    "pricingModel": "On-chain metered",
-                    "paymentProtocol": "arc-usdc",
-                    "network": "arcTestnet",
                     "minPriceUSDC": min_price,
                     "toolCount": len(tools),
                 },

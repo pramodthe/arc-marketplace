@@ -35,14 +35,16 @@ from agents_market.arc.services.erc8004 import (
     submit_validation_response as arc_submit_validation_response,
 )
 from agents_market.arc.services.payments import (
+    ARC_TESTNET_CHAIN_ID,
     ARC_TESTNET_USDC,
+    assert_sufficient_usdc_balance,
     derive_wallet_id_by_address,
     get_wallet_balances,
     transfer_usdc_from_private_key,
     transfer_usdc,
 )
-from agents_market.db import Base, engine, get_db
-from agents_market.marketplace.models import PaymentEvent, ReputationEvent
+from agents_market.db import get_db
+from agents_market.marketplace.models import PaymentEvent, ReputationEvent, Skill
 from agents_market.marketplace.repository import (
     create_agent,
     create_buyer,
@@ -64,6 +66,7 @@ from agents_market.marketplace.repository import (
     list_buyers,
     list_agents_for_marketplace,
     list_payment_events,
+    list_skills_for_tool,
     list_sellers,
     list_tools_for_marketplace,
     payment_summary,
@@ -87,6 +90,24 @@ except ImportError:  # pragma: no cover
         pass
 
 from circle.web3 import developer_controlled_wallets, utils
+
+
+def payment_rails_public_metadata() -> dict[str, Any]:
+    """Circle Gateway Nanopayments (x402) + Arc USDC — stable shape for GET / and invoke responses."""
+    return {
+        "circleGatewayNanopayments": {
+            "product": "Circle Gateway Nanopayments",
+            "protocol": "x402 (HTTP 402, Payment-Signature, Gateway verification / batched settlement)",
+            "sellerChain": "arcTestnet",
+            "implementation": "circlekit create_gateway_middleware + process_request",
+            "documentation": "https://developers.circle.com/gateway/nanopayments",
+        },
+        "arcNativeUsdc": {
+            "product": "Arc",
+            "settlement": "USDC on ARC-TESTNET via Circle developer-controlled wallets (buyerId invokes)",
+            "documentation": "https://developers.circle.com/arc",
+        },
+    }
 
 
 class SellerCreateBody(BaseModel):
@@ -312,6 +333,11 @@ def _validate_provider_endpoint(value: str, *, field_name: str) -> tuple[str, di
 def _provider_origin(endpoint_url: str) -> str:
     parsed = urlparse(endpoint_url)
     return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+
+
+def _idempotency_key(request: Request) -> str | None:
+    key = request.headers.get("Idempotency-Key", "").strip()
+    return key or None
 
 
 def _require_circle_arc_env() -> None:
@@ -592,14 +618,18 @@ def _tool_price_string(price_usdc: float) -> str:
 def _tool_api_payload(tool: Any, db: Session, *, fallback_agent: Any | None = None) -> dict[str, Any]:
     endpoint_url = tool.endpoint_url or (fallback_agent.endpoint_url if fallback_agent is not None else "")
     http_method = tool.http_method or (fallback_agent.http_method if fallback_agent is not None else "POST")
+    tool_price = float(tool.price_usdc)
+    runtime_price = float(tool.runtime_price_usdc)
     return {
         "toolId": tool.id,
         "toolKey": tool.tool_key,
         "slug": tool.slug,
         "name": tool.name,
         "description": tool.description,
-        "priceUSDC": tool.price_usdc,
-        "runtimePriceUSDC": tool.runtime_price_usdc,
+        "toolPriceUSDC": tool_price,
+        "runtimePriceUSDC": runtime_price,
+        "priceUSDC": tool_price,
+        "totalPriceUSDC": tool_price + runtime_price,
         "runtimeUnit": tool.runtime_unit,
         "capabilityType": tool.capability_type,
         "category": tool.category,
@@ -672,7 +702,9 @@ def _build_capabilities_payload(body: AgentCreateBody) -> list[dict[str, Any]]:
     ]
 
 
-def _pricing_breakdown(tool: Any, selected_skill_keys: list[str], *, db: Session) -> tuple[Decimal, list[dict[str, Any]], list[Any]]:
+def _pricing_breakdown(
+    tool: Any, selected_skill_keys: list[str], *, db: Session
+) -> tuple[Decimal, list[dict[str, Any]], list[Skill]]:
     components: list[dict[str, Any]] = []
     total = Decimal("0")
 
@@ -690,8 +722,21 @@ def _pricing_breakdown(tool: Any, selected_skill_keys: list[str], *, db: Session
     )
     total += tool_price
 
-    # Billable skill charging is disabled for now.
-    matched_skills = []
+    # Per-skill USDC line items are disabled for now, but resolve requested keys to
+    # Skill rows so payment/usage events can record selectedSkills accurately.
+    tool_skills = list_skills_for_tool(db, int(tool.id))
+    by_skill_key = {s.skill_key: s for s in tool_skills}
+    matched_skills: list[Skill] = []
+    seen_keys: set[str] = set()
+    for raw in selected_skill_keys:
+        key = str(raw).strip()
+        if not key:
+            continue
+        skill = by_skill_key.get(key)
+        if skill is None or key in seen_keys:
+            continue
+        matched_skills.append(skill)
+        seen_keys.add(key)
 
     runtime_price = Decimal(str(tool.runtime_price_usdc))
     if tool.runtime_unit == "per_request" and runtime_price > 0:
@@ -988,6 +1033,7 @@ async def _preflight_provider(endpoint_url: str) -> dict[str, Any]:
         "healthUrl": health_url,
         "providerStatus": response.status_code,
         "endpointWarning": endpoint_warning,
+        "requiredChainId": ARC_TESTNET_CHAIN_ID,
     }
 
 
@@ -1079,59 +1125,24 @@ async def _process_payment(
             "buyerId": buyer_id,
         },
     )
-    response = JSONResponse(content=result.get("body", result), status_code=result.get("status", 402))
+    raw_body = result.get("body", result)
+    merged: dict[str, Any] = dict(raw_body) if isinstance(raw_body, dict) else {"gatewayBody": raw_body}
+    merged["arcMarketplaceSettlement"] = {
+        "whyNoOnchainTxYet": (
+            "This request had no buyerId and no x402 Payment-Signature, so no Arc USDC transfer was attempted."
+        ),
+        "forArcTestnetUsdcTransfer": (
+            "POST the same invoke URL with JSON including buyerId from POST /buyers (use empty walletAddress "
+            "so a Circle Arc testnet wallet is created). Fund that wallet with Arc testnet USDC, then retry."
+        ),
+        "checkBalance": f"GET {_public_base_url()}/buyers/{{buyerId}}/balances",
+        "priceUSDC": f"{total_amount_usdc:.6f}",
+        "invokePath": invoke_path,
+    }
+    response = JSONResponse(content=merged, status_code=result.get("status", 402))
     for header_name, header_value in result.get("headers", {}).items():
         response.headers[header_name] = header_value
     return response
-
-
-def _payment_required_response(
-    *,
-    db: Session,
-    seller: Any,
-    agent: Any,
-    tool: Any,
-    invoke_path: str,
-    buyer_id: int | None,
-    total_amount_usdc: Decimal,
-    billing_breakdown: list[dict[str, Any]],
-) -> JSONResponse:
-    create_payment_event(
-        db,
-        seller_id=seller.id,
-        agent_id=agent.id,
-        tool_id=tool.id,
-        event_type="payment",
-        status="payment_required",
-        buyer_address=None,
-        transaction_ref=None,
-        amount_usdc=0,
-        details={
-            "path": invoke_path,
-            "price": f"{total_amount_usdc:.6f}",
-            "sellerId": seller.id,
-            "agentId": agent.id,
-            "toolId": tool.id,
-            "buyerId": buyer_id,
-            "billingBreakdown": billing_breakdown,
-            "message": "buyerId is required for custodial on-chain settlement",
-        },
-    )
-    return JSONResponse(
-        status_code=402,
-        content={
-            "message": "Payment required",
-            "required": {
-                "buyerId": "Provide a registered buyerId so the platform can settle USDC on Arc.",
-                "totalUSDC": f"{total_amount_usdc:.6f}",
-                "billingBreakdown": billing_breakdown,
-            },
-            "x402": {
-                "supported": True,
-                "note": "x402 is retained for compatibility, but Arc on-chain settlement is the source of truth.",
-            },
-        },
-    )
 
 
 def _settle_onchain_payment(
@@ -1145,6 +1156,9 @@ def _settle_onchain_payment(
     total_amount_usdc: Decimal,
     billing_breakdown: list[dict[str, Any]],
 ) -> tuple[PaymentEvent, dict[str, Any]]:
+    # Arc uses USDC for gas; require a small cushion beyond the tool price so Circle transfers are less likely to fail mid-flight.
+    gas_cushion_usdc = Decimal(os.getenv("BUYER_SETTLEMENT_USDC_BUFFER", "0.0005"))
+    assert_sufficient_usdc_balance(buyer.wallet_address, total_amount_usdc + gas_cushion_usdc)
     if buyer.owner_wallet_id:
         payment = transfer_usdc(
             wallet_id=buyer.owner_wallet_id,
@@ -1216,6 +1230,7 @@ def _record_provider_failed_event(
     error: Any,
     buyer_id: int | None,
     settlement_mode: str,
+    compensation_state: str | None = None,
 ) -> None:
     provider_host = ""
     if provider_endpoint_url:
@@ -1239,6 +1254,7 @@ def _record_provider_failed_event(
             "billingBreakdown": billing_breakdown,
             "settlementMode": settlement_mode,
             "buyerId": buyer_id,
+            "compensationState": compensation_state,
         },
     )
 
@@ -1462,8 +1478,8 @@ def _transactions_html(payload: dict[str, Any]) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
     app.state.gateway_by_seller = {}
+    app.state.invoke_response_cache = {}
     yield
     for middleware in app.state.gateway_by_seller.values():
         try:
@@ -1488,7 +1504,11 @@ async def root():
         "ok": True,
         "service": "arc-marketplace",
         "mode": "provider-proxy",
-        "message": "Arc marketplace with ERC-8004 registered provider APIs and x402 paid invocation.",
+        "message": (
+            "Arc marketplace: Circle Gateway Nanopayments (x402) for external buyers; "
+            "Arc USDC for registered buyerId settlement; ERC-8004 provider identity."
+        ),
+        "paymentRails": payment_rails_public_metadata(),
     }
 
 
@@ -1936,6 +1956,14 @@ async def invoke_tool(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    idempotency_key = _idempotency_key(request)
+    if idempotency_key:
+        cached = request.app.state.invoke_response_cache.get(idempotency_key)
+        if isinstance(cached, dict):
+            replay = JSONResponse(content=cached)
+            replay.headers["X-Idempotent-Replay"] = "true"
+            return replay
+
     seller = get_seller(db, seller_id)
     if seller is None:
         raise HTTPException(status_code=404, detail="Seller not found")
@@ -1970,7 +1998,7 @@ async def invoke_tool(
 
     if buyer is None:
         if not request.headers.get("Payment-Signature"):
-            return await _process_payment(
+            paid = await _process_payment(
                 request,
                 db,
                 seller=seller,
@@ -1981,22 +2009,26 @@ async def invoke_tool(
                 billing_breakdown=billing_breakdown,
                 buyer_id=buyer_id,
             )
-
-        provider_preflight = await _preflight_provider(endpoint_url)
-        paid = await _process_payment(
-            db=db,
-            request=request,
-            seller=seller,
-            agent=agent,
-            tool=tool,
-            invoke_path=invoke_path,
-            total_amount_usdc=total_amount_usdc,
-            billing_breakdown=billing_breakdown,
-            buyer_id=buyer_id,
-        )
-        if isinstance(paid, JSONResponse):
-            return paid
-        payment_info, payment_event = paid
+            if isinstance(paid, JSONResponse):
+                return paid
+            payment_info, payment_event = paid
+            provider_preflight = await _preflight_provider(endpoint_url)
+        else:
+            provider_preflight = await _preflight_provider(endpoint_url)
+            paid = await _process_payment(
+                request,
+                db,
+                seller=seller,
+                agent=agent,
+                tool=tool,
+                invoke_path=invoke_path,
+                total_amount_usdc=total_amount_usdc,
+                billing_breakdown=billing_breakdown,
+                buyer_id=buyer_id,
+            )
+            if isinstance(paid, JSONResponse):
+                return paid
+            payment_info, payment_event = paid
         x402_payment = {
             "amountUSDC": f"{Decimal(str(payment_info.amount)) / Decimal('1000000'):.6f}",
             "payer": payment_info.payer,
@@ -2029,6 +2061,7 @@ async def invoke_tool(
                 error=exc,
                 buyer_id=buyer_id,
                 settlement_mode="x402_gateway",
+                compensation_state="refund_required",
             )
             raise
 
@@ -2077,6 +2110,7 @@ async def invoke_tool(
                     "responseHeaders": payment_info.response_headers,
                 },
             },
+            "paymentRails": payment_rails_public_metadata(),
             "providerPreflight": provider_preflight,
             "provider": {
                 "endpointHost": urlparse(provider_result["endpointUrl"]).netloc,
@@ -2090,9 +2124,13 @@ async def invoke_tool(
                 ),
             },
         }
+        if idempotency_key:
+            request.app.state.invoke_response_cache[idempotency_key] = response_body
         response = JSONResponse(content=response_body)
         for header_name, header_value in payment_info.response_headers.items():
             response.headers[header_name] = header_value
+        if idempotency_key:
+            response.headers["Idempotency-Key"] = idempotency_key
         return response
 
     provider_preflight = await _preflight_provider(endpoint_url)
@@ -2152,6 +2190,7 @@ async def invoke_tool(
             error=exc,
             buyer_id=buyer_id,
             settlement_mode="buyer_wallet_transfer",
+            compensation_state="refund_required",
         )
         raise
 
@@ -2216,6 +2255,7 @@ async def invoke_tool(
             "settlementMode": settled_payment["settlementMode"],
             "billingBreakdown": billing_breakdown,
         },
+        "paymentRails": payment_rails_public_metadata(),
         "providerPreflight": provider_preflight,
         "provider": {
             "endpointHost": urlparse(provider_result["endpointUrl"]).netloc,
@@ -2230,7 +2270,12 @@ async def invoke_tool(
             ),
         },
     }
-    return JSONResponse(content=response_body)
+    if idempotency_key:
+        request.app.state.invoke_response_cache[idempotency_key] = response_body
+    response = JSONResponse(content=response_body)
+    if idempotency_key:
+        response.headers["Idempotency-Key"] = idempotency_key
+    return response
 
 
 @app.get("/transactions")

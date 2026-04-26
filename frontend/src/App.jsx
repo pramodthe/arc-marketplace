@@ -37,7 +37,11 @@ import {
   listMarketplaceAgents,
   updateToolPricing,
 } from "@/api/marketplaceClient.js"
-import { makeAgentCompositeId, mapMarketplaceAgentsToCards } from "@/lib/agentMappers.js"
+import {
+  makeAgentCompositeId,
+  mapMarketplaceAgentsToCards,
+  resolveMarketplaceAgentIds,
+} from "@/lib/agentMappers.js"
 
 const PAGE_SIZE = 9
 
@@ -875,7 +879,7 @@ function AgentEditScreen({ agent, onBack, onSavePricing, isSubmitting, submitErr
       (agent.tools || []).map((tool) => ({
         toolId: tool.toolId,
         name: tool.name,
-        toolPriceUSDC: String(tool.priceUSDC ?? "0.01"),
+        toolPriceUSDC: String(tool.toolPriceUSDC ?? tool.priceUSDC ?? "0.01"),
         runtimePriceUSDC: String(tool.runtimePriceUSDC ?? "0"),
       })) || [],
   )
@@ -1076,7 +1080,7 @@ function AgentDetailScreen({ agent, onBack, onEditPricing }) {
                       variant="outline"
                       className="rounded-md border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300"
                     >
-                      {Number(tool.priceUSDC || 0).toFixed(4)} USDC
+                      {Number(tool.totalPriceUSDC ?? tool.priceUSDC ?? 0).toFixed(4)} USDC total
                     </Badge>
                     {Number(tool.runtimePriceUSDC || 0) > 0 ? (
                       <Badge
@@ -1230,11 +1234,11 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
   const events = transactionsState?.events || []
   const summary = transactionsState?.summary || {}
   const buyers = transactionsState?.buyers || []
-  const txRows = events.filter((event) => event.eventType === "payment")
-  const latestRows = txRows.slice(0, 40)
+  // API returns newest-first; include seller_output (completed / provider_failed) as well as payment rows.
+  const latestRows = events.slice(0, 40)
 
   return (
-    <section className="mx-auto max-w-[1240px]">
+    <section className="mx-auto min-w-0 max-w-[1240px]">
       <Card className="rounded-2xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
         <CardHeader className="border-b border-zinc-800 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1274,8 +1278,12 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-2 text-[11px] uppercase tracking-[0.1em] text-zinc-400">
-            Transactions
+          <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-2">
+            <p className="text-[11px] uppercase tracking-[0.1em] text-zinc-400">Ledger events</p>
+            <p className="mt-1 text-[11px] font-normal normal-case tracking-normal text-zinc-500">
+              <span className="text-zinc-400">payment</span> = settlement;{" "}
+              <span className="text-zinc-400">seller_output</span> = provider result. Newest first (40 rows).
+            </p>
           </div>
           {loadError ? (
             <div className="m-4 rounded-lg border border-red-900/60 bg-red-950/20 p-3 text-sm text-red-200">{loadError}</div>
@@ -1311,6 +1319,14 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
                   const hash = event.onchainTxHash || event.transactionRef || "pending"
                   const fromAddr = details.payer || details.buyerAddress || "n/a"
                   const toAddr = details.payee || details.sellerRecipientAddress || "n/a"
+                  const failReason =
+                    typeof details.error === "string" && details.error.trim()
+                      ? details.error.trim()
+                      : typeof details.providerError === "string" && details.providerError.trim()
+                        ? details.providerError.trim()
+                        : ""
+                  const failReasonShort =
+                    failReason.length > 120 ? `${failReason.slice(0, 117)}…` : failReason
                   return (
                     <tr key={`${event.timestamp || "none"}-${idx}`} className="border-t border-zinc-800/90">
                       <td className="px-4 py-2">
@@ -1325,14 +1341,24 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
                         <ExplorerAddressLink address={toAddr} />
                       </td>
                       <td className="px-4 py-2 text-zinc-200">{details.amountUSDC || "0.000000"}</td>
-                      <td className={`px-4 py-2 uppercase tracking-[0.12em] ${statusClass}`}>{event.status}</td>
+                      <td className={`max-w-[280px] px-4 py-2 align-top ${statusClass}`}>
+                        <span className="block uppercase tracking-[0.12em]">{event.status}</span>
+                        {failReason ? (
+                          <span
+                            className="mt-1 block font-normal normal-case tracking-normal text-zinc-500"
+                            title={failReason}
+                          >
+                            {failReasonShort}
+                          </span>
+                        ) : null}
+                      </td>
                     </tr>
                   )
                 })}
                 {!latestRows.length ? (
                   <tr>
                     <td className="px-4 py-4 text-zinc-500" colSpan={7}>
-                      No payment transactions yet.
+                      No ledger events yet. Run a paid invoke against the seller API to populate this view.
                     </td>
                   </tr>
                 ) : null}
@@ -1342,18 +1368,15 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
         </CardContent>
       </Card>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card className="rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
+      <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-2">
+        <Card className="min-w-0 rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
           <CardHeader className="p-4 pb-2">
             <p className="text-xs uppercase tracking-[0.12em] text-zinc-400">Live Tape</p>
           </CardHeader>
-          <CardContent className="px-0 pb-4 pt-0">
-            <div className="overflow-hidden border-y border-zinc-800/80 bg-zinc-950/60 py-2">
+          <CardContent className="min-w-0 px-0 pb-4 pt-0">
+            <div className="w-full min-w-0 max-w-full overflow-hidden border-y border-zinc-800/80 bg-zinc-950/60 py-2">
               <div className="transactions-ticker whitespace-nowrap px-4 text-xs text-zinc-300">
-                {(events.slice(0, 16).length
-                  ? events.slice(0, 16)
-                  : [{ status: "idle", details: {}, eventType: "waiting", timestamp: "" }]
-                ).map((event, idx) => (
+                {[...events.slice(0, 16), ...events.slice(0, 16)].map((event, idx) => (
                   <span key={`${event.timestamp || "none"}-${idx}`} className="mr-6 inline-flex items-center gap-2">
                     <span className="text-zinc-500">{formatClock(event.timestamp)}</span>
                     <span className="uppercase tracking-[0.12em] text-zinc-300">{event.eventType}</span>
@@ -1365,18 +1388,24 @@ function TransactionsScreen({ transactionsState, isLoading, loadError, onRefresh
             </div>
           </CardContent>
         </Card>
-        <Card className="rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
+        <Card className="min-w-0 rounded-xl border-zinc-800 bg-[#0b0e13] text-zinc-100 shadow-none">
           <CardHeader className="p-4 pb-2">
             <p className="text-xs uppercase tracking-[0.12em] text-zinc-400">Top Buyer Wallets</p>
           </CardHeader>
           <CardContent className="space-y-2 p-4 pt-2">
-            {buyers.slice(0, 8).map((buyer) => (
-              <div key={buyer.buyerAddress} className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2">
-                <ExplorerAddressLink address={buyer.buyerAddress} className="text-[11px]" />
-                <span className="text-[11px] text-zinc-400">{buyer.paymentsCount} trades</span>
-                <span className="text-[11px] text-sky-300">{buyer.totalAmountUSDC} USDC</span>
-              </div>
-            ))}
+            {buyers
+              .filter((buyer) => buyer && buyer.buyerAddress)
+              .slice(0, 8)
+              .map((buyer, idx) => (
+                <div
+                  key={String(buyer.buyerAddress) || `buyer-${idx}`}
+                  className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2"
+                >
+                  <ExplorerAddressLink address={buyer.buyerAddress} className="text-[11px]" />
+                  <span className="text-[11px] text-zinc-400">{buyer.paymentsCount ?? 0} trades</span>
+                  <span className="text-[11px] text-sky-300">{buyer.totalAmountUSDC ?? "0"} USDC</span>
+                </div>
+              ))}
             {buyers.length === 0 ? <p className="text-xs text-zinc-500">No buyer activity yet.</p> : null}
           </CardContent>
         </Card>
@@ -1644,9 +1673,14 @@ export default function App() {
   async function deleteAgentCard(agent) {
     const confirmed = window.confirm(`Delete ${agent.name}? This will remove it from the marketplace list.`)
     if (!confirmed) return
+    const { sellerId, agentId } = resolveMarketplaceAgentIds(agent)
+    if (!Number.isFinite(sellerId) || !Number.isFinite(agentId)) {
+      window.alert("This listing is missing seller or agent ids, so it cannot be deleted from the API.")
+      return
+    }
     setDeletingAgentIds((current) => new Set(current).add(agent.id))
     try {
-      await deleteAgent(agent.sellerId, agent.agentId)
+      await deleteAgent(sellerId, agentId)
       await refreshAgents({ showLoading: false })
       if (routeState?.agentId === agent.id) {
         goBackToRegistry()
@@ -1724,7 +1758,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="flex-1 px-4 py-5 lg:px-6">
+        <div className="min-w-0 flex-1 px-4 py-5 lg:px-6">
           {routeState?.page === "transactions" ? (
             <TransactionsScreen
               transactionsState={transactionsState}

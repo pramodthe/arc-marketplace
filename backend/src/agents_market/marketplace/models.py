@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agents_market.db import Base
@@ -16,6 +17,7 @@ def utc_now() -> datetime:
 
 class Seller(Base):
     __tablename__ = "sellers"
+    __table_args__ = (UniqueConstraint("owner_wallet_address", name="uq_sellers_owner_wallet_address"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -34,6 +36,7 @@ class Seller(Base):
 
 class Buyer(Base):
     __tablename__ = "buyers"
+    __table_args__ = (UniqueConstraint("wallet_address", name="uq_buyers_wallet_address"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -86,11 +89,11 @@ class Tool(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     slug: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    price_usdc: Mapped[float] = mapped_column(Float, nullable=False)
+    price_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     endpoint_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     http_method: Mapped[str] = mapped_column(String(12), default="POST", nullable=False)
     category: Mapped[str] = mapped_column(String(80), default="General", nullable=False)
-    runtime_price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    runtime_price_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     runtime_unit: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
     capability_type: Mapped[str] = mapped_column(String(32), default="tool", nullable=False)
     config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -104,13 +107,14 @@ class Tool(Base):
 
 class Skill(Base):
     __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("tool_id", "skill_key", name="uq_skills_tool_id_skill_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"), index=True)
     skill_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    price_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -129,7 +133,7 @@ class PaymentEvent(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False)
     buyer_address: Mapped[str | None] = mapped_column(String(66), nullable=True, index=True)
     transaction_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    amount_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    amount_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     details: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
@@ -170,8 +174,8 @@ class GatewayAccount(Base):
     seller_id: Mapped[int] = mapped_column(ForeignKey("sellers.id"), unique=True, index=True)
     chain: Mapped[str] = mapped_column(String(64), default="arcTestnet", nullable=False)
     wallet_address: Mapped[str] = mapped_column(String(66), nullable=False)
-    wallet_balance_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
-    gateway_available_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    wallet_balance_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
+    gateway_available_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -182,7 +186,7 @@ class BridgeTransfer(Base):
     seller_id: Mapped[int] = mapped_column(ForeignKey("sellers.id"), index=True)
     source_chain: Mapped[str] = mapped_column(String(64), nullable=False)
     destination_chain: Mapped[str] = mapped_column(String(64), nullable=False)
-    amount_usdc: Mapped[float] = mapped_column(Float, nullable=False)
+    amount_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     status: Mapped[str] = mapped_column(String(64), default="queued", nullable=False)
     transfer_ref: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     transfer_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
@@ -200,7 +204,7 @@ class BuyerInvocation(Base):
     payment_event_id: Mapped[int | None] = mapped_column(ForeignKey("payment_events.id"), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     output_preview: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    amount_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    amount_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     transaction_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(64), default="completed", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
@@ -221,9 +225,14 @@ class UsageRecord(Base):
     component_type: Mapped[str] = mapped_column(String(32), nullable=False)
     component_key: Mapped[str] = mapped_column(String(64), nullable=False)
     component_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    units: Mapped[float] = mapped_column(Float, default=1, nullable=False)
-    unit_price_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
-    subtotal_usdc: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    units: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("1"), nullable=False)
+    unit_price_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
+    subtotal_usdc: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
     buyer_invocation: Mapped[BuyerInvocation | None] = relationship(back_populates="usage_records")
+
+
+Index("ix_agents_status_updated_at", Agent.status, Agent.updated_at)
+Index("ix_tools_enabled_price_updated_at", Tool.enabled, Tool.price_usdc, Tool.updated_at)
+Index("ix_payment_events_status_created_at", PaymentEvent.status, PaymentEvent.created_at)

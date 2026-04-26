@@ -7,6 +7,23 @@ from typing import Any
 import httpx
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    """Parse API id fields that may be int or numeric string; reject bool."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(text, 10)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class BuyerProfile:
     id: int
@@ -208,9 +225,9 @@ class BuyerMarketplaceSDK:
             price_usdc=price,
             invoke_url=invoke_url,
             source=str(item.get("source", "internal")),
-            seller_id=int(seller_id) if isinstance(seller_id, int) else None,
-            agent_id=int(agent_id) if isinstance(agent_id, int) else None,
-            tool_id=int(tool_id) if isinstance(tool_id, int) else None,
+            seller_id=_coerce_optional_int(seller_id),
+            agent_id=_coerce_optional_int(agent_id),
+            tool_id=_coerce_optional_int(tool_id),
             skills=item.get("skills") if isinstance(item.get("skills"), list) else [],
             raw=item,
         )

@@ -54,9 +54,11 @@ input {
   overflow: hidden;
 }
 
+/* Inline-flex + w-max: width matches content for translateX(-50%) loop; clip lives on parent (w-full min-w-0 overflow-hidden). */
 .transactions-ticker {
-  display: inline-block;
-  min-width: 100%;
+  display: inline-flex;
+  width: max-content;
+  max-width: none;
   animation: ticker-scroll 40s linear infinite;
 }
 
