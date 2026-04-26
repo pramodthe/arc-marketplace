@@ -35,6 +35,15 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _initial_buyer_wallet_address() -> str:
+    """Optional preset ``walletAddress`` on ``POST /buyers`` when no ``BUYER_ID`` yet.
+
+    Only explicit env wins (no ``AI_AGENT_N`` default): otherwise the marketplace
+    provisions a full Circle buyer wallet pair so paid invokes work after funding.
+    """
+    return _env("AUTONOMOUS_BUYER_WALLET_ADDRESS") or _env("BUYER_WALLET_ADDRESS")
+
+
 def _gemini_api_key() -> str:
     return _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
 
@@ -268,11 +277,19 @@ async def run_autonomous_buyer_turn(
     buyer_id = _parse_buyer_id(_env("BUYER_ID"))
     buyer_name = _env("BUYER_NAME", "LLM Marketplace Buyer")
     agent_filter = _env("MARKETPLACE_AGENT_NAME_SUBSTRING") or None
+    initial_wallet = _initial_buyer_wallet_address()
+
+    if buyer_id is None and initial_wallet:
+        probe = BuyerMarketplaceSDK(server_url=server_url)
+        found_id = await probe.find_buyer_id_by_wallet_address(initial_wallet)
+        if found_id is not None:
+            buyer_id = found_id
 
     sdk = BuyerMarketplaceSDK(
         server_url=server_url,
         buyer_id=buyer_id,
         buyer_name=buyer_name,
+        initial_wallet_address=initial_wallet if buyer_id is None else None,
     )
     profile = await sdk.ensure_buyer()
 

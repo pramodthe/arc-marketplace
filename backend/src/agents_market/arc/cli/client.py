@@ -43,7 +43,7 @@ async def _async_main() -> None:
             print(f"Wallet USDC: {balances.wallet.formatted}")
             print(f"Gateway available: {balances.gateway.formatted_available}")
 
-            async with httpx.AsyncClient(timeout=10) as http:
+            async with httpx.AsyncClient(timeout=180.0) as http:
                 tools_res = await http.get(f"{server_url}/marketplace/tools")
                 tools_res.raise_for_status()
                 tools = tools_res.json().get("tools", [])
@@ -92,13 +92,13 @@ async def _async_main() -> None:
             print(f"Prompt: {prompt}")
             print(f"AI response: {result.data.get('outputText')}")
 
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=180.0) as client:
                 health = await client.get(f"{server_url}/health")
                 print(f"\nHealth check: {health.status_code}")
         return
 
     print("circlekit not installed; using demo x402 signature flow")
-    async with httpx.AsyncClient(timeout=10) as http:
+    async with httpx.AsyncClient(timeout=180.0) as http:
         tools_res = await http.get(f"{server_url}/marketplace/tools")
         tools_res.raise_for_status()
         tools = tools_res.json().get("tools", [])
@@ -121,6 +121,20 @@ async def _async_main() -> None:
             print("Invoke succeeded without payment challenge (likely buyerId settlement path).")
             print(f"AI response: {first.json().get('outputText')}")
             return
+        if body.get("buyerId") is not None:
+            try:
+                err_payload = first.json()
+            except Exception:
+                err_payload = {}
+            detail = err_payload.get("detail", first.text)
+            detail_text = detail if isinstance(detail, str) else json.dumps(detail, indent=2)
+            print("Invoke failed with buyerId (Arc USDC settlement did not complete). Server said:")
+            print(detail_text)
+            print(
+                "\nTip: fund the buyer on Arc testnet, confirm BUYER_ID matches `/buyers/<id>/balances`, "
+                "and restart `arc-seller` after pulling payment helper fixes."
+            )
+            sys.exit(1)
         payload = first.json()
         required_header = first.headers.get("PAYMENT-REQUIRED", "")
         required_payload = {}

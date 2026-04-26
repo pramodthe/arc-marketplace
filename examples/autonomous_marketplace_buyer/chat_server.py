@@ -8,6 +8,7 @@ Does **not** modify ``arc-seller``. Run alongside the marketplace API:
 
 Then open ``QA_test/autonomous_buyer_chat_demo.html`` (static server on ``QA_test/``) and set
 **Chat / demo server URL** to ``http://localhost:9095`` (or ``AUTONOMOUS_BUYER_CHAT_PORT``).
+Turns are capped by ``AUTONOMOUS_BUYER_REQUEST_TIMEOUT_SEC`` (default 180s) so the UI does not hang forever.
 
 Env: ``backend/.env`` + repo ``.env`` + ``examples/autonomous_marketplace_buyer/.env`` (see ``autonomous_llm_runner``).
 Marketplace URL for tool calls: ``SERVER_URL`` / ``PUBLIC_BASE_URL`` (default ``http://localhost:4021``).
@@ -15,6 +16,7 @@ Marketplace URL for tool calls: ``SERVER_URL`` / ``PUBLIC_BASE_URL`` (default ``
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -31,7 +33,7 @@ if str(_EXAMPLE_DIR) not in sys.path:
 
 from autonomous_llm_runner import run_autonomous_buyer_turn  # noqa: E402
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 import uvicorn  # noqa: E402
@@ -52,9 +54,36 @@ app.add_middleware(
 )
 
 
+def _chat_turn_timeout_sec() -> float:
+    raw = os.getenv("AUTONOMOUS_BUYER_REQUEST_TIMEOUT_SEC", "180").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return 180.0
+    return max(30.0, min(v, 900.0))
+
+
 @app.post("/demo/autonomous-llm-buyer/chat")
 async def chat(body: ChatBody):
-    return await run_autonomous_buyer_turn(body.message, include_trace=body.includeTrace)
+    timeout = _chat_turn_timeout_sec()
+    try:
+        return await asyncio.wait_for(
+            run_autonomous_buyer_turn(body.message, include_trace=body.includeTrace),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "timeout",
+                "message": (
+                    f"Autonomous buyer turn exceeded {timeout:.0f}s "
+                    "(LLM + marketplace tools). Shorten the task, check API keys and "
+                    f"{os.getenv('SERVER_URL', 'http://localhost:4021')}, or raise "
+                    "AUTONOMOUS_BUYER_REQUEST_TIMEOUT_SEC."
+                ),
+            },
+        ) from None
 
 
 @app.get("/health")

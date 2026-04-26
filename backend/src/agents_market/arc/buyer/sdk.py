@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -64,11 +65,13 @@ class BuyerMarketplaceSDK:
         buyer_id: int | None = None,
         buyer_name: str = "Marketplace Buyer",
         timeout_seconds: float = 30.0,
+        initial_wallet_address: str | None = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self._buyer_id = buyer_id
         self.buyer_name = buyer_name
         self.timeout_seconds = timeout_seconds
+        self._initial_wallet_address = (initial_wallet_address or "").strip()
 
     async def ensure_buyer(self) -> BuyerProfile:
         if self._buyer_id is not None:
@@ -86,7 +89,7 @@ class BuyerMarketplaceSDK:
                     "name": self.buyer_name,
                     "organization": "Agents Market",
                     "description": "Autonomous buyer for marketplace integrations",
-                    "walletAddress": "",
+                    "walletAddress": self._initial_wallet_address,
                 },
             )
             response.raise_for_status()
@@ -103,6 +106,20 @@ class BuyerMarketplaceSDK:
             response = await http.get(f"{self.server_url}/buyers/{buyer_id}")
             response.raise_for_status()
         return dict(response.json()["buyer"])
+
+    async def find_buyer_id_by_wallet_address(self, address: str) -> int | None:
+        """Return marketplace ``buyer`` ``id`` whose ``walletAddress`` matches (case-insensitive)."""
+        want = (address or "").strip().lower()
+        if not want:
+            return None
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as http:
+            response = await http.get(f"{self.server_url}/buyers")
+            response.raise_for_status()
+        for row in response.json().get("buyers", []):
+            got = str(row.get("walletAddress", "")).strip().lower()
+            if got == want:
+                return int(row["id"])
+        return None
 
     async def discover(
         self,
@@ -167,6 +184,39 @@ class BuyerMarketplaceSDK:
         """Build a ToolCandidate from a marketplace discover row or tool listing dict."""
         return self._to_candidate(item)
 
+    def _invoke_error_message(self, response: httpx.Response, *, buyer_id: int | None) -> str:
+        """Turn failed invoke responses into text agents and humans can act on (e.g. 402 funding)."""
+        snippet = ""
+        try:
+            data = response.json()
+        except Exception:
+            snippet = (response.text or "").strip()[:800]
+        else:
+            if isinstance(data, dict):
+                detail = data.get("detail")
+                if isinstance(detail, str):
+                    snippet = detail
+                elif detail is not None:
+                    snippet = json.dumps(detail, indent=2)[:800]
+                else:
+                    snippet = json.dumps(data, indent=2)[:800]
+            else:
+                snippet = str(data)[:800]
+        url = str(response.request.url) if response.request else ""
+        base = f"HTTP {response.status_code} from marketplace invoke ({url})"
+        if not snippet:
+            snippet = response.reason_phrase or "no response body"
+        parts = [base, snippet]
+        if response.status_code == 402:
+            bid = f"buyers/{buyer_id}/balances" if buyer_id is not None else "buyers/<id>/balances"
+            parts.append(
+                "On buyerId invokes, 402 means Arc testnet USDC settlement failed (insufficient balance, "
+                "missing Circle wallet id, or no local private key for this address). "
+                f"Check `GET {self.server_url}/{bid}` and fund USDC on Arc testnet; "
+                "optional env `BUYER_SETTLEMENT_USDC_BUFFER` adds headroom beyond the tool price."
+            )
+        return "\n".join(parts)
+
     async def invoke(
         self,
         *,
@@ -176,13 +226,16 @@ class BuyerMarketplaceSDK:
         include_buyer_id: bool = True,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"prompt": prompt, "selectedSkills": selected_skills or []}
+        buyer_id_for_errors: int | None = self._buyer_id
         if include_buyer_id:
             buyer = await self.ensure_buyer()
             payload["buyerId"] = buyer.id
+            buyer_id_for_errors = buyer.id
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as http:
             response = await http.post(candidate.invoke_url, json=payload)
-            response.raise_for_status()
+            if response.is_error:
+                raise RuntimeError(self._invoke_error_message(response, buyer_id=buyer_id_for_errors))
         return dict(response.json())
 
     def desired_tool_from_prompt(self, *, task: str, prompt: str) -> str:

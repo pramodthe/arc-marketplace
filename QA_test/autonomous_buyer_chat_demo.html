@@ -176,6 +176,7 @@
         <label for="msg">Message</label>
         <textarea id="msg" rows="3" placeholder="e.g. Find a cheap demo tool and invoke it once, then summarize."></textarea>
         <button type="button" id="sendBtn">Send</button>
+        <p id="status" class="meta" style="margin-top: 10px; min-height: 1.2em"></p>
         <p id="err" class="err" style="margin-top: 8px"></p>
       </section>
 
@@ -199,8 +200,12 @@
     <script>
       const thread = document.getElementById("thread");
       const errEl = document.getElementById("err");
+      const statusEl = document.getElementById("status");
       const traceSection = document.getElementById("traceSection");
       const tracePre = document.getElementById("tracePre");
+
+      /** Client-side cap so the tab does not hang forever if the server never responds. */
+      const CLIENT_FETCH_MS = 210000;
 
       function baseUrl() {
         return document.getElementById("baseUrl").value.trim().replace(/\/$/, "");
@@ -222,6 +227,7 @@
 
       document.getElementById("sendBtn").addEventListener("click", async () => {
         errEl.textContent = "";
+        statusEl.textContent = "";
         traceSection.style.display = "none";
         const msg = document.getElementById("msg").value.trim();
         if (!msg) {
@@ -233,6 +239,18 @@
         bubble("user", msg, null);
         document.getElementById("msg").value = "";
 
+        const pending = document.createElement("div");
+        pending.className = "bubble assistant";
+        pending.id = "pendingReply";
+        pending.textContent =
+          "Working… (LLM + marketplace tools often take 30–120s. If this disappears with no reply, check the chat server log and SERVER_URL / API keys.)";
+        thread.appendChild(pending);
+        thread.scrollTop = thread.scrollHeight;
+        statusEl.textContent = "Request sent — waiting for response…";
+
+        const ac = new AbortController();
+        const abortTimer = setTimeout(() => ac.abort(), CLIENT_FETCH_MS);
+
         try {
           const r = await fetch(`${baseUrl()}/demo/autonomous-llm-buyer/chat`, {
             method: "POST",
@@ -241,6 +259,7 @@
               message: msg,
               includeTrace: document.getElementById("includeTrace").checked,
             }),
+            signal: ac.signal,
           });
           const data = r.headers.get("content-type")?.includes("application/json") ? await r.json() : await r.text();
           if (r.status === 404) {
@@ -249,6 +268,17 @@
                 ? String(data.detail)
                 : "404 — is chat_server.py running? Check Chat server URL (default :9095).";
             bubble("assistant", "(No reply — wrong URL or server not running.)", null);
+            return;
+          }
+          if (r.status === 504) {
+            const detail =
+              typeof data === "object" && data.detail
+                ? typeof data.detail === "object"
+                  ? data.detail.message || JSON.stringify(data.detail)
+                  : String(data.detail)
+                : String(data);
+            errEl.textContent = detail;
+            bubble("assistant", "Timed out — the buyer agent took too long (see error above).", null);
             return;
           }
           if (r.status === 503) {
@@ -273,10 +303,24 @@
             traceSection.style.display = "block";
           }
         } catch (e) {
-          errEl.textContent = String(e);
-          bubble("assistant", "Network error — is the API running? CORS is open on this app.", null);
+          const name = e && e.name;
+          if (name === "AbortError") {
+            errEl.textContent =
+              `No response after ${CLIENT_FETCH_MS / 1000}s — aborting fetch. Is chat_server.py running? Try curl ${baseUrl()}/health`;
+            bubble(
+              "assistant",
+              "Stopped waiting — browser gave up. The server may still be working; check its terminal.",
+              null,
+            );
+          } else {
+            errEl.textContent = String(e);
+            bubble("assistant", "Network error — is the API running? CORS is open on this app.", null);
+          }
         } finally {
+          clearTimeout(abortTimer);
+          document.getElementById("pendingReply")?.remove();
           btn.disabled = false;
+          statusEl.textContent = "";
         }
       });
     </script>

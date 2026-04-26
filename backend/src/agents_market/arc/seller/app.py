@@ -494,6 +494,9 @@ def _ensure_buyer_arc_wallets(buyer: Any, db: Session) -> None:
             buyer.owner_wallet_id = derived_wallet_id
             db.commit()
             db.refresh(buyer)
+            return
+        # Preset address is not linkable to this Circle entity; fall through to provision.
+    if buyer.owner_wallet_id and not buyer.validator_wallet_id:
         return
     _create_buyer_wallets(buyer)
     db.commit()
@@ -940,6 +943,89 @@ async def _fetch_external_candidates() -> list[dict[str, Any]]:
     return candidates
 
 
+def _agent_protocol_for_provider(agent: Any) -> str:
+    raw = (getattr(agent, "protocol_type", None) or "http").strip().lower()
+    return raw if raw in {"http", "mcp", "a2a"} else "http"
+
+
+def _provider_uses_a2a_jsonrpc(agent: Any, endpoint_url: str) -> bool:
+    if _agent_protocol_for_provider(agent) == "a2a":
+        return True
+    return "/a2a/" in (endpoint_url or "").lower()
+
+
+def _build_a2a_message_send_rpc(
+    *,
+    prompt: str,
+    buyer_id: int | None,
+    marketplace: dict[str, Any],
+) -> dict[str, Any]:
+    """JSON-RPC 2.0 body for A2A ``message/send`` (Agent2Agent over HTTP)."""
+    rpc_id = str(uuid.uuid4())
+    message_id = str(uuid.uuid4())
+    meta: dict[str, Any] = {"marketplace": marketplace}
+    if buyer_id is not None:
+        meta["marketplaceBuyerId"] = buyer_id
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "message/send",
+        "params": {
+            "message": {
+                "kind": "message",
+                "role": "user",
+                "messageId": message_id,
+                "parts": [{"kind": "text", "text": prompt}],
+            },
+            "configuration": {"blocking": True},
+            "metadata": meta,
+        },
+    }
+
+
+def _a2a_extract_output_text(data: dict[str, Any]) -> str:
+    """Best-effort text from A2A JSON-RPC success body (Message or Task)."""
+    err = data.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("data") or err)
+    result = data.get("result")
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    if not isinstance(result, dict):
+        return str(result)
+
+    def _parts_text(parts: list[Any]) -> str:
+        for p in parts or []:
+            if not isinstance(p, dict):
+                continue
+            if p.get("kind") == "text" or p.get("type") == "text":
+                t = p.get("text")
+                if t is not None:
+                    return str(t)
+        return ""
+
+    text = _parts_text(result.get("parts"))
+    if text:
+        return text
+    for art in result.get("artifacts") or []:
+        if isinstance(art, dict):
+            text = _parts_text(art.get("parts"))
+            if text:
+                return text
+    status = result.get("status")
+    if isinstance(status, dict):
+        msg = status.get("message")
+        if msg:
+            return str(msg)
+    for key in ("outputText", "text", "content"):
+        v = result.get(key)
+        if isinstance(v, str) and v.strip():
+            return v
+    return json.dumps(result)[:8000]
+
+
 async def _forward_to_provider(
     agent: Any,
     tool: Any,
@@ -950,24 +1036,41 @@ async def _forward_to_provider(
 ) -> dict[str, Any]:
     endpoint_url = tool.endpoint_url or agent.endpoint_url
     endpoint_url, _warning = _validate_provider_endpoint(endpoint_url, field_name="endpointUrl")
-    payload = {
-        "prompt": body.prompt,
-        "buyerId": buyer_id,
-        "selectedSkills": body.selectedSkills,
-        "usageUnits": body.usageUnits,
-        "billing": billing_breakdown,
-        "marketplace": {
-            "agentId": agent.id,
-            "toolId": tool.id,
-            "toolKey": tool.tool_key,
-            "arcAgentId": agent.arc_agent_id,
-            "network": "arcTestnet",
-        },
+    marketplace = {
+        "agentId": agent.id,
+        "toolId": tool.id,
+        "toolKey": tool.tool_key,
+        "arcAgentId": agent.arc_agent_id,
+        "network": "arcTestnet",
     }
-    method = _normalize_http_method(tool.http_method or agent.http_method)
+    use_a2a = _provider_uses_a2a_jsonrpc(agent, endpoint_url)
+    if use_a2a:
+        payload: dict[str, Any] = _build_a2a_message_send_rpc(
+            prompt=body.prompt,
+            buyer_id=buyer_id,
+            marketplace=marketplace,
+        )
+        method = "POST"
+    else:
+        payload = {
+            "prompt": body.prompt,
+            "buyerId": buyer_id,
+            "selectedSkills": body.selectedSkills,
+            "usageUnits": body.usageUnits,
+            "billing": billing_breakdown,
+            "marketplace": marketplace,
+        }
+        method = _normalize_http_method(tool.http_method or agent.http_method)
+    timeout = 90.0 if use_a2a else 30.0
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            if method == "GET":
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if use_a2a:
+                provider_response = await client.post(
+                    endpoint_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+            elif method == "GET":
                 provider_response = await client.get(
                     endpoint_url,
                     params={"prompt": body.prompt, "selectedSkills": ",".join(body.selectedSkills)},
@@ -994,10 +1097,25 @@ async def _forward_to_provider(
             },
         )
 
+    if use_a2a and isinstance(data, dict) and data.get("error") is not None:
+        err = data["error"]
+        preview = err if isinstance(err, str) else json.dumps(err)[:500]
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "A2A provider returned JSON-RPC error",
+                "providerStatus": provider_response.status_code,
+                "providerPreview": preview,
+            },
+        )
+
     if isinstance(data, str):
         output_text = data
     elif isinstance(data, dict):
-        output_text = data.get("outputText") or data.get("result") or str(data)
+        if use_a2a:
+            output_text = _a2a_extract_output_text(data)
+        else:
+            output_text = data.get("outputText") or data.get("result") or str(data)
     else:
         output_text = str(data)
     return {
@@ -1619,8 +1737,7 @@ async def create_buyer_endpoint(body: BuyerCreateBody, db: Session = Depends(get
         wallet_address=body.walletAddress,
         validator_wallet_address=body.validatorWalletAddress,
     )
-    if not body.walletAddress.strip():
-        _ensure_buyer_arc_wallets(buyer, db)
+    _ensure_buyer_arc_wallets(buyer, db)
     return {"buyer": _buyer_api_payload(buyer)}
 
 

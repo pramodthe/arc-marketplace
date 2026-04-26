@@ -10,6 +10,10 @@ from decimal import Decimal
 from typing import Any
 
 from circle.web3 import developer_controlled_wallets, utils
+from circle.web3.developer_controlled_wallets import TransferBlockchain
+from circle.web3.developer_controlled_wallets.models.create_transfer_transaction_for_developer_request_blockchain import (
+    CreateTransferTransactionForDeveloperRequestBlockchain,
+)
 from eth_account import Account
 from web3 import Web3
 
@@ -125,17 +129,26 @@ def transfer_usdc(
 ) -> OnchainPaymentResult:
     client = wallets_client()
     transactions_api = developer_controlled_wallets.TransactionsApi(client)
-    request = developer_controlled_wallets.CreateTransferTransactionForDeveloperRequest(
-        idempotencyKey=str(uuid.uuid4()),
-        walletId=wallet_id,
-        walletAddress=wallet_address,
-        blockchain=ARC_TESTNET,
-        destinationAddress=destination_address,
-        amounts=[f"{amount_usdc.quantize(Decimal('0.000001')):f}"],
-        tokenAddress=ARC_TESTNET_USDC,
-        feeLevel="MEDIUM",
-        refId=ref_id,
-    )
+    blockchain = CreateTransferTransactionForDeveloperRequestBlockchain(TransferBlockchain.ARC_MINUS_TESTNET)
+    # Circle API: walletId XOR walletAddress — never send both.
+    wid = (wallet_id or "").strip()
+    waddr = (wallet_address or "").strip()
+    if not wid and not waddr:
+        raise ValueError("transfer_usdc requires wallet_id or wallet_address")
+    kwargs: dict[str, Any] = {
+        "idempotencyKey": str(uuid.uuid4()),
+        "blockchain": blockchain,
+        "destinationAddress": destination_address,
+        "amounts": [f"{amount_usdc.quantize(Decimal('0.000001')):f}"],
+        "tokenAddress": ARC_TESTNET_USDC,
+        "feeLevel": "MEDIUM",
+        "refId": ref_id,
+    }
+    if wid:
+        kwargs["walletId"] = wid
+    else:
+        kwargs["walletAddress"] = waddr
+    request = developer_controlled_wallets.CreateTransferTransactionForDeveloperRequest(**kwargs)
     response = transactions_api.create_developer_transaction_transfer(request)
     tx_id = response.data.id
     tx_hash = wait_for_transaction_hash(transactions_api, tx_id)
