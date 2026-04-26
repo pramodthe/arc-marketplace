@@ -19,8 +19,6 @@ dependencies = [
     "eth-account>=0.13",
     "web3>=7.0",
     "circle-developer-controlled-wallets>=6.0",
-    # circlekit + x402 Gateway client/middleware (install from sibling path by default)
-    "circle-titanoboa-sdk[x402]",
 ]
 
 [project.scripts]
@@ -34,10 +32,14 @@ arc-demo-marketplace = "agents_market.arc.cli.demo_marketplace:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents_market"]
 
-[tool.uv.sources]
-circle-titanoboa-sdk = { path = "../../circle-titanoboa-sdk", editable = true }
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+]
+llm-buyer = [
+    "langchain>=1.0",
+    "langchain-core>=1.0",
+    "langchain-google-genai>=2.0",
+    "langchain-openai>=1.0",
+    "langsmith>=0.3",
 ]

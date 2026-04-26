@@ -92,6 +92,12 @@ except ImportError:  # pragma: no cover
 from circle.web3 import developer_controlled_wallets, utils
 
 
+def _x402_runtime_mode() -> str:
+    if create_gateway_middleware is not None:
+        return "circlekit_gateway"
+    return "disabled"
+
+
 def payment_rails_public_metadata() -> dict[str, Any]:
     """Circle Gateway Nanopayments (x402) + Arc USDC — stable shape for GET / and invoke responses."""
     return {
@@ -101,11 +107,13 @@ def payment_rails_public_metadata() -> dict[str, Any]:
             "sellerChain": "arcTestnet",
             "implementation": "circlekit create_gateway_middleware + process_request",
             "documentation": "https://developers.circle.com/gateway/nanopayments",
+            "enabled": _x402_runtime_mode() != "disabled",
+            "runtimeMode": _x402_runtime_mode(),
         },
         "arcNativeUsdc": {
             "product": "Arc",
             "settlement": "USDC on ARC-TESTNET via Circle developer-controlled wallets (buyerId invokes)",
-            "documentation": "https://developers.circle.com/arc",
+            "documentation": "https://docs.arc.network/arc/references/connect-to-arc",
         },
     }
 
@@ -1038,19 +1046,62 @@ async def _preflight_provider(endpoint_url: str) -> dict[str, Any]:
 
 
 async def _ensure_gateway_middleware(app: FastAPI, seller_address: str):
-    if create_gateway_middleware is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "x402 Gateway support is unavailable because circlekit is not installed. "
-                "Restore circle-titanoboa-sdk or install circle-titanoboa-sdk[x402]."
-            ),
-        )
     middleware = app.state.gateway_by_seller.get(seller_address)
     if middleware is None:
+        if create_gateway_middleware is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "x402 support is unavailable because circlekit is not installed in this backend runtime. "
+                    "Install the SDK that provides `circlekit`, then restart the API."
+                ),
+            )
         middleware = create_gateway_middleware(seller_address=seller_address, chain="arcTestnet")
         app.state.gateway_by_seller[seller_address] = middleware
     return middleware
+
+
+def _record_x402_payment_failure_event(
+    db: Session,
+    *,
+    seller: Any,
+    agent: Any,
+    tool: Any,
+    invoke_path: str,
+    total_amount_usdc: Decimal,
+    billing_breakdown: list[dict[str, Any]],
+    buyer_id: int | None,
+    payment_header: str | None,
+    failure_code: str,
+    failure_reason: str,
+    http_status: int,
+) -> None:
+    create_payment_event(
+        db,
+        seller_id=seller.id,
+        agent_id=agent.id,
+        tool_id=tool.id,
+        event_type="payment",
+        status="failed",
+        buyer_address=None,
+        transaction_ref=None,
+        amount_usdc=0,
+        details={
+            "failureCode": failure_code,
+            "failureReason": failure_reason,
+            "invokePath": invoke_path,
+            "sellerId": seller.id,
+            "agentId": agent.id,
+            "toolId": tool.id,
+            "buyerId": buyer_id,
+            "settlementMode": "x402_gateway",
+            "runtimeMode": _x402_runtime_mode(),
+            "httpStatus": http_status,
+            "paymentSignaturePresent": bool(payment_header),
+            "priceUSDC": f"{total_amount_usdc:.6f}",
+            "billingBreakdown": billing_breakdown,
+        },
+    )
 
 
 async def _process_payment(
@@ -1066,7 +1117,24 @@ async def _process_payment(
     buyer_id: int | None = None,
 ):
     payment_header = request.headers.get("Payment-Signature")
-    middleware = await _ensure_gateway_middleware(request.app, seller.owner_wallet_address)
+    try:
+        middleware = await _ensure_gateway_middleware(request.app, seller.owner_wallet_address)
+    except HTTPException as exc:
+        _record_x402_payment_failure_event(
+            db,
+            seller=seller,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            total_amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+            buyer_id=buyer_id,
+            payment_header=payment_header,
+            failure_code="x402_runtime_unavailable",
+            failure_reason=str(exc.detail),
+            http_status=exc.status_code,
+        )
+        raise
     result = await middleware.process_request(
         payment_header=payment_header,
         path=invoke_path,
@@ -1103,43 +1171,56 @@ async def _process_payment(
         )
         return result, event
 
-    create_payment_event(
-        db,
-        seller_id=seller.id,
-        agent_id=agent.id,
-        tool_id=tool.id,
-        event_type="payment",
-        status="payment_required",
-        buyer_address=None,
-        transaction_ref=None,
-        amount_usdc=0,
-        details={
-            "path": invoke_path,
-            "price": f"{total_amount_usdc:.6f}",
-            "httpStatus": result.get("status", 402),
-            "settlementMode": "x402_gateway",
-            "billingBreakdown": billing_breakdown,
-            "sellerId": seller.id,
-            "agentId": agent.id,
-            "toolId": tool.id,
-            "buyerId": buyer_id,
-        },
-    )
     raw_body = result.get("body", result)
     merged: dict[str, Any] = dict(raw_body) if isinstance(raw_body, dict) else {"gatewayBody": raw_body}
-    merged["arcMarketplaceSettlement"] = {
-        "whyNoOnchainTxYet": (
-            "This request had no buyerId and no x402 Payment-Signature, so no Arc USDC transfer was attempted."
-        ),
-        "forArcTestnetUsdcTransfer": (
-            "POST the same invoke URL with JSON including buyerId from POST /buyers (use empty walletAddress "
-            "so a Circle Arc testnet wallet is created). Fund that wallet with Arc testnet USDC, then retry."
-        ),
-        "checkBalance": f"GET {_public_base_url()}/buyers/{{buyerId}}/balances",
-        "priceUSDC": f"{total_amount_usdc:.6f}",
-        "invokePath": invoke_path,
-    }
-    response = JSONResponse(content=merged, status_code=result.get("status", 402))
+    status_code = int(result.get("status", 402))
+    if payment_header:
+        failure_reason = str(merged.get("message") or "x402 payment verification failed")
+        _record_x402_payment_failure_event(
+            db,
+            seller=seller,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            total_amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+            buyer_id=buyer_id,
+            payment_header=payment_header,
+            failure_code="x402_verification_failed",
+            failure_reason=failure_reason,
+            http_status=status_code,
+        )
+        merged["paymentFailure"] = {
+            "failureCode": "x402_verification_failed",
+            "failureReason": failure_reason,
+            "invokePath": invoke_path,
+            "runtimeMode": _x402_runtime_mode(),
+        }
+    else:
+        create_payment_event(
+            db,
+            seller_id=seller.id,
+            agent_id=agent.id,
+            tool_id=tool.id,
+            event_type="payment",
+            status="payment_required",
+            buyer_address=None,
+            transaction_ref=None,
+            amount_usdc=0,
+            details={
+                "path": invoke_path,
+                "price": f"{total_amount_usdc:.6f}",
+                "httpStatus": status_code,
+                "settlementMode": "x402_gateway",
+                "runtimeMode": _x402_runtime_mode(),
+                "billingBreakdown": billing_breakdown,
+                "sellerId": seller.id,
+                "agentId": agent.id,
+                "toolId": tool.id,
+                "buyerId": buyer_id,
+            },
+        )
+    response = JSONResponse(content=merged, status_code=status_code)
     for header_name, header_value in result.get("headers", {}).items():
         response.headers[header_name] = header_value
     return response
@@ -1500,14 +1581,18 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
+    gateway_enabled = _x402_runtime_mode() != "disabled"
     return {
         "ok": True,
         "service": "arc-marketplace",
         "mode": "provider-proxy",
         "message": (
-            "Arc marketplace: Circle Gateway Nanopayments (x402) for external buyers; "
-            "Arc USDC for registered buyerId settlement; ERC-8004 provider identity."
+            "Arc marketplace: Arc USDC settlement for registered buyerId invokes; "
+            "optional Circle Gateway Nanopayments (x402) for external buyers when enabled; "
+            "ERC-8004 provider identity."
         ),
+        "gatewayNanopaymentsEnabled": gateway_enabled,
+        "gatewayNanopaymentsMode": _x402_runtime_mode(),
         "paymentRails": payment_rails_public_metadata(),
     }
 
@@ -1518,6 +1603,8 @@ async def health(db: Session = Depends(get_db)):
         "status": "ok",
         "sellerCount": len(list_sellers(db)),
         "buyerCount": len(list_buyers(db)),
+        "gatewayNanopaymentsEnabled": _x402_runtime_mode() != "disabled",
+        "gatewayNanopaymentsMode": _x402_runtime_mode(),
         "timestamp": _utc_iso(),
     }
 
@@ -1672,20 +1759,26 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
     http_method = capabilities[0]["httpMethod"]
     offering_type = _normalize_offering_type(body.offeringType)
     protocol_type = _normalize_protocol_type(body.protocolType)
-    _ensure_seller_arc_wallets(seller, db)
+    arc_registration_warning: dict[str, Any] | None = None
+    registration = None
     try:
+        _ensure_seller_arc_wallets(seller, db)
         registration = register_agent_identity(
             metadata_uri=body.metadataUri or endpoint_url,
             owner_wallet_id=seller.owner_wallet_id,
             validator_wallet_id=seller.validator_wallet_id,
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Arc ERC-8004 registration failed: {exc}") from exc
+        arc_registration_warning = {
+            "code": "arc_registration_failed",
+            "message": f"Arc ERC-8004 registration failed: {exc}",
+        }
 
-    seller.owner_wallet_id = registration.owner_wallet_id
-    seller.validator_wallet_id = registration.validator_wallet_id
-    seller.owner_wallet_address = registration.owner_wallet_address
-    seller.validator_wallet_address = registration.validator_wallet_address
+    if registration is not None:
+        seller.owner_wallet_id = registration.owner_wallet_id
+        seller.validator_wallet_id = registration.validator_wallet_id
+        seller.owner_wallet_address = registration.owner_wallet_address
+        seller.validator_wallet_address = registration.validator_wallet_address
     agent = create_agent(
         db,
         seller_id=seller_id,
@@ -1702,20 +1795,30 @@ async def create_agent_endpoint(seller_id: int, body: AgentCreateBody, db: Sessi
         price_usdc=body.priceUSDC,
         capabilities=capabilities,
     )
-    agent.arc_agent_id = registration.agent_id
-    agent.identity_tx_hash = registration.tx_hash
-    agent.status = "registered"
+    if registration is not None:
+        agent.arc_agent_id = registration.agent_id
+        agent.identity_tx_hash = registration.tx_hash
+        agent.status = "registered"
+    else:
+        agent.status = "registration_failed"
     db.commit()
     db.refresh(agent)
     db.refresh(seller)
+    warnings = list(endpoint_warnings)
+    if arc_registration_warning is not None:
+        warnings.append(arc_registration_warning)
     return {
         "agent": {
             **_agent_api_payload(agent),
             "tools": [_tool_api_payload(tool, db, fallback_agent=agent) for tool in agent.tools],
         },
         "seller": _seller_api_payload(seller),
-        "arc": {"txHash": registration.tx_hash, "agentId": registration.agent_id},
-        "warnings": endpoint_warnings,
+        "arc": (
+            {"txHash": registration.tx_hash, "agentId": registration.agent_id}
+            if registration is not None
+            else None
+        ),
+        "warnings": warnings,
     }
 
 
@@ -1997,38 +2100,21 @@ async def invoke_tool(
     endpoint_url = tool.endpoint_url or agent.endpoint_url
 
     if buyer is None:
-        if not request.headers.get("Payment-Signature"):
-            paid = await _process_payment(
-                request,
-                db,
-                seller=seller,
-                agent=agent,
-                tool=tool,
-                invoke_path=invoke_path,
-                total_amount_usdc=total_amount_usdc,
-                billing_breakdown=billing_breakdown,
-                buyer_id=buyer_id,
-            )
-            if isinstance(paid, JSONResponse):
-                return paid
-            payment_info, payment_event = paid
-            provider_preflight = await _preflight_provider(endpoint_url)
-        else:
-            provider_preflight = await _preflight_provider(endpoint_url)
-            paid = await _process_payment(
-                request,
-                db,
-                seller=seller,
-                agent=agent,
-                tool=tool,
-                invoke_path=invoke_path,
-                total_amount_usdc=total_amount_usdc,
-                billing_breakdown=billing_breakdown,
-                buyer_id=buyer_id,
-            )
-            if isinstance(paid, JSONResponse):
-                return paid
-            payment_info, payment_event = paid
+        paid = await _process_payment(
+            request,
+            db,
+            seller=seller,
+            agent=agent,
+            tool=tool,
+            invoke_path=invoke_path,
+            total_amount_usdc=total_amount_usdc,
+            billing_breakdown=billing_breakdown,
+            buyer_id=buyer_id,
+        )
+        if isinstance(paid, JSONResponse):
+            return paid
+        payment_info, payment_event = paid
+        provider_preflight = await _preflight_provider(endpoint_url)
         x402_payment = {
             "amountUSDC": f"{Decimal(str(payment_info.amount)) / Decimal('1000000'):.6f}",
             "payer": payment_info.payer,

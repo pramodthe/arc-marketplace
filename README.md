@@ -15,7 +15,7 @@ The repository has:
 
 ### Core implemented flows
 - **Marketplace CRUD + discovery**: sellers, buyer records, agent listings (with `offeringType` / `protocolType`), tools and optional per-tool **skills**, ranked discovery via `POST /marketplace/discover`, and a legacy-shaped `GET /tools` catalog.
-- **Paid invocation flow**: external buyers use **[Circle Gateway Nanopayments](https://developers.circle.com/gateway/nanopayments)** (HTTP **402** + **`Payment-Signature`**, `circlekit` on **`arcTestnet`**). Registered demo buyers use **[Arc](https://developers.circle.com/arc)** **USDC** on **ARC-TESTNET** via JSON **`buyerId`** and Circle **developer-controlled** wallets (no x402 on that path). Successful invoke responses and **`GET /`** include a stable **`paymentRails`** object describing both rails.
+- **Paid invocation flow**: external buyers use **[Circle Gateway Nanopayments](https://developers.circle.com/gateway/nanopayments)** (HTTP **402** + **`Payment-Signature`**, `circlekit` on **`arcTestnet`**). Registered demo buyers use **[Arc](https://docs.arc.network/arc/references/connect-to-arc)** **USDC** on **ARC-TESTNET** via JSON **`buyerId`** and Circle **developer-controlled** wallets (no x402 on that path). Successful invoke responses and **`GET /`** include a stable **`paymentRails`** object describing both rails.
 - **Provider safety**: outbound calls resolve provider hosts; **localhost/private IPs are rejected by default** (opt in with **`ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true`** for local Docker demos). After x402 payment, the seller **preflights** `{provider-origin}/health` before calling the provider invoke URL.
 - **Ledgering**: payment, usage, and seller-output events are stored for reporting; **`GET /transactions`** exposes JSON summaries and **`GET /transactions/view`** renders a simple HTML ledger.
 - **Arc lifecycle endpoints**: ERC-8004-style **register**, **reputation**, and **validation request/response** for marketplace **agents** (by global `agent_id`) and optional **buyer** Arc registration under **`POST /buyers/{buyer_id}/arc/register`**.
@@ -26,6 +26,7 @@ The repository has:
 ### Current limitations (important)
 - **Bridge transfer endpoint is an orchestration stub** (records queued transfer metadata; does not execute a full bridge route yet).
 - **Provider listings require Circle/Arc environment variables** because active listings are automatically registered on Arc ERC-8004.
+- `circlekit` is required for x402 paid invokes; when unavailable, invoke requests fail closed and failures are logged in `payment_events`/`GET /transactions`.
 
 ---
 
@@ -137,6 +138,17 @@ uv run arc-seller
 ```
 
 Default base URL: `http://localhost:4021`
+
+## One-command demo deploy
+
+From repo root:
+
+```bash
+docker compose up --build
+```
+
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:4021`
 
 Useful backend commands:
 

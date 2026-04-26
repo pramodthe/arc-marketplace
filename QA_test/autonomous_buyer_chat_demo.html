@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Autonomous LLM buyer — chat demo</title>
+    <style>
+      :root {
+        --bg: #0c1222;
+        --card: #111827;
+        --border: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --user: #1e3a5f;
+        --bot: #0f172a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 8px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.5;
+        margin-bottom: 20px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 14px;
+      }
+      label {
+        font-size: 11px;
+        color: #93c5fd;
+        display: block;
+        margin-bottom: 4px;
+      }
+      input,
+      textarea,
+      button {
+        width: 100%;
+        background: #0b1220;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      button {
+        cursor: pointer;
+        font-weight: 600;
+        margin-top: 10px;
+        background: linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%);
+        border-color: #0369a1;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .row input[type="text"] {
+        flex: 1 1 200px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .check input {
+        width: auto;
+      }
+      #thread {
+        min-height: 200px;
+        max-height: 420px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .bubble {
+        max-width: 92%;
+        padding: 10px 14px;
+        border-radius: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .bubble.user {
+        align-self: flex-end;
+        background: var(--user);
+        border: 1px solid #2563eb;
+      }
+      .bubble.assistant {
+        align-self: flex-start;
+        background: var(--bot);
+        border: 1px solid var(--border);
+      }
+      .meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      pre.trace {
+        font-size: 11px;
+        background: #020617;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        overflow: auto;
+        max-height: 220px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .err {
+        color: #f87171;
+        font-size: 13px;
+      }
+      footer {
+        margin-top: 16px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Autonomous LLM buyer</h1>
+      <p class="sub">
+        Real-world style chat: run the <strong>example-only</strong> server
+        <code>examples/autonomous_marketplace_buyer/chat_server.py</code> (default port <strong>9095</strong>) —
+        same LangChain loop as <code>run_agent.py</code> (discover → invoke with <code>buyerId</code> against the
+        marketplace on <code>SERVER_URL</code>, usually <strong>4021</strong>). Gemini / OpenAI keys live in
+        <code>backend/.env</code> and/or the example <code>.env</code>, not in this page.
+      </p>
+
+      <section class="card">
+        <label for="baseUrl">Chat server URL (chat_server.py)</label>
+        <input id="baseUrl" type="text" value="http://localhost:9095" autocomplete="off" />
+        <p class="check">
+          <input type="checkbox" id="includeTrace" />
+          <label for="includeTrace" style="margin: 0">Include tool trace in response (larger JSON)</label>
+        </p>
+      </section>
+
+      <section class="card">
+        <label for="msg">Message</label>
+        <textarea id="msg" rows="3" placeholder="e.g. Find a cheap demo tool and invoke it once, then summarize."></textarea>
+        <button type="button" id="sendBtn">Send</button>
+        <p id="err" class="err" style="margin-top: 8px"></p>
+      </section>
+
+      <section class="card">
+        <h2 style="margin: 0 0 10px; font-size: 1rem">Thread</h2>
+        <div id="thread"></div>
+      </section>
+
+      <section class="card" id="traceSection" style="display: none">
+        <h2 style="margin: 0 0 8px; font-size: 1rem">Trace</h2>
+        <pre class="trace" id="tracePre"></pre>
+      </section>
+
+      <footer>
+        Runbook:
+        <a href="../examples/autonomous_marketplace_buyer/README.md">examples/autonomous_marketplace_buyer/README.md</a>
+        · SDK-style UI: <a href="./buyer_agent_chatbot_demo.html">buyer_agent_chatbot_demo.html</a>
+      </footer>
+    </div>
+
+    <script>
+      const thread = document.getElementById("thread");
+      const errEl = document.getElementById("err");
+      const traceSection = document.getElementById("traceSection");
+      const tracePre = document.getElementById("tracePre");
+
+      function baseUrl() {
+        return document.getElementById("baseUrl").value.trim().replace(/\/$/, "");
+      }
+
+      function bubble(role, text, meta) {
+        const d = document.createElement("div");
+        d.className = "bubble " + role;
+        d.textContent = text;
+        thread.appendChild(d);
+        if (meta) {
+          const m = document.createElement("div");
+          m.className = "meta";
+          m.textContent = meta;
+          thread.appendChild(m);
+        }
+        thread.scrollTop = thread.scrollHeight;
+      }
+
+      document.getElementById("sendBtn").addEventListener("click", async () => {
+        errEl.textContent = "";
+        traceSection.style.display = "none";
+        const msg = document.getElementById("msg").value.trim();
+        if (!msg) {
+          errEl.textContent = "Enter a message.";
+          return;
+        }
+        const btn = document.getElementById("sendBtn");
+        btn.disabled = true;
+        bubble("user", msg, null);
+        document.getElementById("msg").value = "";
+
+        try {
+          const r = await fetch(`${baseUrl()}/demo/autonomous-llm-buyer/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: msg,
+              includeTrace: document.getElementById("includeTrace").checked,
+            }),
+          });
+          const data = r.headers.get("content-type")?.includes("application/json") ? await r.json() : await r.text();
+          if (r.status === 404) {
+            errEl.textContent =
+              typeof data === "object" && data.detail
+                ? String(data.detail)
+                : "404 — is chat_server.py running? Check Chat server URL (default :9095).";
+            bubble("assistant", "(No reply — wrong URL or server not running.)", null);
+            return;
+          }
+          if (r.status === 503) {
+            errEl.textContent = typeof data === "object" ? JSON.stringify(data.detail || data) : String(data);
+            bubble("assistant", "(Server missing LangChain group — uv sync --group llm-buyer)", null);
+            return;
+          }
+          if (r.status !== 200) {
+            errEl.textContent = typeof data === "object" ? JSON.stringify(data, null, 2) : String(data);
+            bubble("assistant", "Request failed (see error above).", null);
+            return;
+          }
+          if (!data.ok) {
+            errEl.textContent = data.error || "Agent error";
+            bubble("assistant", String(data.error || "error"), null);
+            return;
+          }
+          const meta = `buyerId=${data.buyerId} · ${data.model || ""}`;
+          bubble("assistant", data.reply || "(empty reply)", meta);
+          if (data.trace && data.trace.length) {
+            tracePre.textContent = JSON.stringify(data.trace, null, 2);
+            traceSection.style.display = "block";
+          }
+        } catch (e) {
+          errEl.textContent = String(e);
+          bubble("assistant", "Network error — is the API running? CORS is open on this app.", null);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

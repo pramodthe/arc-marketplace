@@ -5,7 +5,7 @@ Multi-seller Arc marketplace backend for hackathon demos:
 - FastAPI service under `src/agents_market/arc/seller/app.py`
 - Seller/agent/tool persistence with SQLAlchemy + Alembic
 - [Circle Gateway Nanopayments](https://developers.circle.com/gateway/nanopayments): x402 via `circlekit` (`arcTestnet`) for external buyers
-- [Arc](https://developers.circle.com/arc) USDC on ARC-TESTNET for registered buyers (`buyerId` + Circle developer-controlled wallets)
+- [Arc](https://docs.arc.network/arc/references/connect-to-arc) USDC on ARC-TESTNET for registered buyers (`buyerId` + Circle developer-controlled wallets)
 - `GET /` and successful `.../invoke` responses include `paymentRails` metadata linking both rails for integrations and demos
 - Arc ERC-8004 identity/reputation/validation service endpoints
 - Gateway demo treasury and `POST .../bridge/transfers` (persists a transfer row; orchestration is a hackathon stub, not live Bridge Kit execution)
@@ -29,11 +29,19 @@ uv sync
 cp .env.example .env
 ```
 
+Optional **LangChain** dependency group for the autonomous marketplace buyer example (Gemini and/or OpenAI; not required to run the API):
+
+```bash
+uv sync --group llm-buyer
+```
+
+Set **`GEMINI_API_KEY`** or **`GOOGLE_API_KEY`** (and optional **`GEMINI_API_BASE_URL`**) in `backend/.env` — see `backend/.env.example` and [`../examples/autonomous_marketplace_buyer/README.md`](../examples/autonomous_marketplace_buyer/README.md).
+
 Default DB:
 
 - `DATABASE_URL=sqlite:///./agents_market.db`
 
-`circle-titanoboa-sdk` (provides `circlekit` and x402) is wired from `../../circle-titanoboa-sdk`. Update `[tool.uv.sources]` in `pyproject.toml` if your local path differs.
+`circlekit` is required for x402 paid invoke. If it is unavailable, invoke requests fail closed and a `payment` event with `status=failed` is recorded in `payment_events` (visible via `GET /transactions`).
 
 ## Run
 
@@ -42,6 +50,19 @@ uv run arc-seller
 ```
 
 Base URL defaults to `http://localhost:4021`.
+
+## Docker deploy (demo prototype)
+
+From the repo root:
+
+```bash
+docker compose up --build
+```
+
+- Backend: `http://localhost:4021`
+- Frontend: `http://localhost:5173`
+
+Ensure the backend image/runtime includes `circlekit`; otherwise x402 invokes will return failure and be logged to the transactions ledger.
 
 ## QA and smoke validation
 
@@ -351,7 +372,7 @@ uv run alembic revision --autogenerate -m "message"
 
 ## Deployment smoke checklist
 
-Use this checklist before each deployment (SQLite and Arc testnet demo mode):
+Use this checklist before each deployment (SQLite and Arc testnet):
 
 1. Start backend and confirm liveness:
    - `uv run arc-seller`
@@ -363,6 +384,7 @@ Use this checklist before each deployment (SQLite and Arc testnet demo mode):
    - Run `uv run arc-buyer` or a custom script using `BuyerMarketplaceSDK.discover()` and `invoke()`.
 4. Payment rails:
    - x402 path: first invoke without `Payment-Signature` returns HTTP 402, retry with signature succeeds.
+   - x402 strict mode: invalid signature or unavailable x402 runtime fails invoke and records `payment.status=failed` with `failureCode` in `/transactions`.
    - buyerId path: invoke with registered `buyerId` settles Arc USDC and returns output.
 5. Ledger and UI:
    - `GET /transactions` includes payment + seller_output rows.

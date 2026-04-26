@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Demo — AI buyer agent (SDK-style flow)</title>
+    <style>
+      :root {
+        --bg: #0c1222;
+        --card: #111827;
+        --border: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --ok: #22c55e;
+        --bad: #f87171;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 28px 20px 48px;
+      }
+      header {
+        margin-bottom: 24px;
+      }
+      header h1 {
+        margin: 0 0 8px;
+        font-size: 1.55rem;
+        font-weight: 600;
+      }
+      header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.5;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        padding: 4px 10px;
+        border-radius: 999px;
+        margin-bottom: 12px;
+      }
+      section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin-bottom: 16px;
+      }
+      section h2 {
+        margin: 0 0 12px;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #cbd5e1;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        color: #93c5fd;
+        margin-bottom: 4px;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .field {
+        flex: 1 1 160px;
+        min-width: 0;
+      }
+      input,
+      textarea,
+      select,
+      button {
+        width: 100%;
+        background: #0b1220;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      textarea {
+        min-height: 100px;
+        resize: vertical;
+      }
+      button {
+        cursor: pointer;
+        font-weight: 500;
+        border-color: #475569;
+      }
+      button.primary {
+        background: linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%);
+        border-color: #0369a1;
+        color: #fff;
+      }
+      button.primary:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .actions button {
+        width: auto;
+        flex: 1 1 140px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .check input {
+        width: auto;
+      }
+      pre.out {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #020617;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 12px;
+        max-height: 280px;
+        overflow: auto;
+        margin: 0;
+      }
+      .reply {
+        background: #020617;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px 16px;
+        min-height: 80px;
+        line-height: 1.55;
+        font-size: 14px;
+        white-space: pre-wrap;
+      }
+      .reply.empty {
+        color: var(--muted);
+        font-style: italic;
+      }
+      .status {
+        font-size: 13px;
+        margin-top: 10px;
+      }
+      .status.ok {
+        color: var(--ok);
+      }
+      .status.bad {
+        color: var(--bad);
+      }
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      @media (max-width: 720px) {
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      footer {
+        margin-top: 20px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <span class="badge">Demo</span>
+        <h1>AI chatbot buyer agent</h1>
+        <p>
+          Same flow as <code>BuyerMarketplaceSDK</code> in the browser: discover marketplace tools, pick the best match
+          for budget and task, then invoke with <code>buyerId</code> for Arc settlement. Serve this folder over HTTP
+          (for example <code>python3 -m http.server 8080</code> inside <code>QA_test/</code>) so the browser can load
+          assets and call your API. If requests fail with a network error, confirm CORS allows your page origin.
+        </p>
+      </header>
+
+      <section>
+        <h2>Marketplace</h2>
+        <div class="row">
+          <div class="field">
+            <label for="baseUrl">Base URL</label>
+            <input id="baseUrl" value="http://localhost:4021" autocomplete="off" />
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Buyer</h2>
+        <div class="row">
+          <div class="field">
+            <label for="buyerName">Name</label>
+            <input id="buyerName" value="Demo Chatbot Buyer" />
+          </div>
+          <div class="field">
+            <label for="buyerOrg">Organization</label>
+            <input id="buyerOrg" value="Demo" />
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <div class="field" style="flex: 2 1 280px">
+            <label for="buyerDesc">Description</label>
+            <input id="buyerDesc" value="Autonomous buyer for marketplace demo" />
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <div class="field" style="flex: 2 1 320px">
+            <label for="buyerWallet">Wallet address (optional)</label>
+            <input id="buyerWallet" value="0xc66BBb9C0c697c41cd4a05fA1D2E5552c1af7a23" size="44" />
+          </div>
+          <div class="field">
+            <label for="buyerSelect">Active buyer</label>
+            <select id="buyerSelect">
+              <option value="">(select or create)</option>
+            </select>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" id="createBuyerBtn">Create buyer</button>
+          <button type="button" id="refreshBuyersBtn">Refresh list</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Agent task</h2>
+        <div class="field" style="margin-bottom: 12px">
+          <label for="agentPrompt">User message (sent to the tool)</label>
+          <textarea id="agentPrompt">Plan a 3-day Tokyo trip under $1500 with one cultural day and one food day.</textarea>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="budget">Budget USDC (discovery)</label>
+            <input id="budget" value="0.05" />
+          </div>
+          <div class="field">
+            <label for="desiredTool">Desired tool (API)</label>
+            <select id="desiredTool">
+              <option value="auto">auto</option>
+              <option value="summarize">summarize</option>
+              <option value="analyze">analyze</option>
+              <option value="plan">plan</option>
+              <option value="response">response</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="taskHint">Task hint (pick logic)</label>
+            <select id="taskHint">
+              <option value="auto">auto (infer from prompt)</option>
+              <option value="summarize">summarize</option>
+              <option value="analyze">analyze</option>
+              <option value="plan">plan</option>
+              <option value="response">response</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="maxResults">Max results</label>
+            <input id="maxResults" type="number" min="1" max="20" value="5" />
+          </div>
+        </div>
+        <div style="margin-top: 12px" class="check">
+          <input type="checkbox" id="includeBuyerId" checked />
+          <label for="includeBuyerId" style="margin: 0; color: var(--muted); font-size: 13px">
+            Include <code>buyerId</code> on invoke (Arc path). Uncheck to hit x402 path (no signature in this UI).
+          </label>
+        </div>
+        <div class="actions">
+          <button type="button" class="primary" id="runFlowBtn">Run full agent flow</button>
+          <button type="button" id="discoverOnlyBtn">Discover only</button>
+          <button type="button" id="transactionsBtn">Load /transactions</button>
+        </div>
+        <p class="status" id="runStatus"></p>
+      </section>
+
+      <section>
+        <h2>Agent reply</h2>
+        <div id="replyBox" class="reply empty">Run the flow to show the model or provider response here.</div>
+      </section>
+
+      <section>
+        <h2>Technical trace</h2>
+        <div class="grid-2">
+          <div>
+            <label style="margin-bottom: 6px">Flow steps (JSON)</label>
+            <pre class="out" id="traceLog">{}</pre>
+          </div>
+          <div>
+            <label style="margin-bottom: 6px">Latest /transactions (JSON)</label>
+            <pre class="out" id="txLog">{}</pre>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Full QA harness (sellers, x402 buttons): <a href="./buyer_test_ui.html">buyer_test_ui.html</a>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        const trace = [];
+
+        function baseUrl() {
+          return document.getElementById("baseUrl").value.trim().replace(/\/$/, "");
+        }
+
+        function setTrace() {
+          document.getElementById("traceLog").textContent = JSON.stringify(trace, null, 2);
+        }
+
+        function pushStep(name, data) {
+          trace.push({ step: name, at: new Date().toISOString(), ...data });
+          setTrace();
+        }
+
+        function setStatus(msg, ok) {
+          const el = document.getElementById("runStatus");
+          el.textContent = msg;
+          el.className = "status " + (ok === true ? "ok" : ok === false ? "bad" : "");
+        }
+
+        async function api(path, options = {}) {
+          const response = await fetch(`${baseUrl()}${path}`, {
+            headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+            ...options,
+          });
+          const ct = response.headers.get("content-type") || "";
+          const payload = ct.includes("application/json") ? await response.json() : await response.text();
+          return { status: response.status, payload };
+        }
+
+        /** Map absolute invoke URL to path for same-origin API fetch. */
+        function pathFromInvokeUrl(invokeUrl, base) {
+          const baseNorm = String(base).replace(/\/$/, "");
+          const u = String(invokeUrl || "").trim();
+          if (u.startsWith(baseNorm + "/")) return u.slice(baseNorm.length) || "/";
+          if (u.startsWith("/")) return u;
+          try {
+            const parsed = new URL(u);
+            return parsed.pathname + parsed.search;
+          } catch {
+            return u;
+          }
+        }
+
+        /** Mirrors BuyerMarketplaceSDK._to_candidate */
+        function toCandidate(base, item) {
+          const toolKey = String(item.toolKey || "response");
+          const price = Number(item.priceUSDC ?? 0);
+          let invokeUrl = String(item.invokeUrl || "").trim();
+          const seller = item.seller && typeof item.seller === "object" ? item.seller : {};
+          const agent = item.agent && typeof item.agent === "object" ? item.agent : {};
+          const toolId = item.toolId;
+          const sellerId = item.sellerId != null ? item.sellerId : seller.id;
+          const agentId = item.agentId != null ? item.agentId : agent.id;
+          if (invokeUrl.startsWith("/")) invokeUrl = base + invokeUrl;
+          if (!invokeUrl && sellerId != null && agentId != null && toolId != null) {
+            invokeUrl = `${base}/sellers/${sellerId}/agents/${agentId}/tools/${toolId}/invoke`;
+          }
+          if (!invokeUrl) throw new Error("Could not resolve invoke URL for " + toolKey);
+          return {
+            toolKey,
+            priceUSDC: price,
+            invokeUrl,
+            skills: Array.isArray(item.skills) ? item.skills : [],
+            raw: item,
+          };
+        }
+
+        function candidateFromDiscoverRow(base, row) {
+          const inner = row && typeof row === "object" ? row.candidate || row : {};
+          return toCandidate(base, inner);
+        }
+
+        function candidateFromTool(base, tool) {
+          return toCandidate(base, tool);
+        }
+
+        /** Mirrors BuyerMarketplaceSDK.desired_tool_from_prompt */
+        function desiredToolFromPrompt(task, prompt) {
+          const normalized = String(task || "").trim().toLowerCase();
+          if (["summarize", "analyze", "plan", "response"].includes(normalized)) return normalized;
+          const lowered = String(prompt || "").toLowerCase();
+          if (
+            ["roadmap", "milestone", "step-by-step", "sprint plan", "project plan"].some((t) => lowered.includes(t))
+          ) {
+            return "plan";
+          }
+          if (["analyze", "compare", "deep dive", "trade-off", "risk of"].some((t) => lowered.includes(t))) {
+            return "analyze";
+          }
+          return "summarize";
+        }
+
+        /** Mirrors BuyerMarketplaceSDK.pick_best */
+        function pickBest(desiredTool, budget, candidates, fallbackTools) {
+          const preferredMap = {
+            plan: ["plan", "analyze", "summarize", "response"],
+            analyze: ["analyze", "summarize", "response", "plan"],
+            summarize: ["summarize", "response", "analyze", "plan"],
+            response: ["response", "summarize", "analyze", "plan"],
+          };
+          const preferredKeys = preferredMap[desiredTool] || ["summarize", "response", "analyze", "plan"];
+          const byKey = {};
+          for (const item of candidates) byKey[item.toolKey] = item;
+          for (const key of preferredKeys) {
+            const candidate = byKey[key];
+            if (candidate && budget >= candidate.priceUSDC) {
+              if (key === desiredTool) return { tool: candidate, reason: "selected=" + key + " (matches task)" };
+              return { tool: candidate, reason: "downgraded_to=" + key + " (budget or preference)" };
+            }
+          }
+          const sortedC = [...candidates].sort((a, b) => a.priceUSDC - b.priceUSDC);
+          for (const candidate of sortedC) {
+            if (budget >= candidate.priceUSDC) {
+              return { tool: candidate, reason: "downgraded_to=" + candidate.toolKey + " (fallback)" };
+            }
+          }
+          const sortedF = [...(fallbackTools || [])].sort((a, b) => a.priceUSDC - b.priceUSDC);
+          for (const tool of sortedF) {
+            if (budget >= tool.priceUSDC) {
+              return { tool: tool, reason: "downgraded_to=" + tool.toolKey + " (marketplace fallback)" };
+            }
+          }
+          return { tool: null, reason: "insufficient_budget_for_any_tool" };
+        }
+
+        function firstSkillKeys(candidate, limit) {
+          const items = candidate.skills || [];
+          const out = [];
+          for (const skill of items) {
+            if (out.length >= limit) break;
+            if (skill && skill.skillKey) out.push(String(skill.skillKey));
+          }
+          return out;
+        }
+
+        function eventCount(payload) {
+          return Array.isArray(payload && payload.events) ? payload.events.length : 0;
+        }
+
+        async function refreshBuyers() {
+          const res = await api("/buyers");
+          if (res.status !== 200) {
+            pushStep("buyers_list", { ok: false, httpStatus: res.status, payload: res.payload });
+            return;
+          }
+          const buyers = res.payload.buyers || [];
+          const sel = document.getElementById("buyerSelect");
+          sel.innerHTML = '<option value="">(select or create)</option>';
+          buyers.forEach((b) => {
+            const opt = document.createElement("option");
+            opt.value = String(b.id);
+            opt.textContent = `${b.id} — ${b.name}`;
+            sel.appendChild(opt);
+          });
+          pushStep("buyers_list", { ok: true, count: buyers.length });
+        }
+
+        async function createBuyer() {
+          const body = {
+            name: document.getElementById("buyerName").value.trim(),
+            organization: document.getElementById("buyerOrg").value.trim(),
+            description: document.getElementById("buyerDesc").value.trim(),
+            walletAddress: document.getElementById("buyerWallet").value.trim(),
+            validatorWalletAddress: "",
+          };
+          const res = await api("/buyers", { method: "POST", body: JSON.stringify(body) });
+          if (res.status !== 200) {
+            pushStep("buyer_create", { ok: false, httpStatus: res.status, payload: res.payload });
+            return;
+          }
+          const id = res.payload.buyer && res.payload.buyer.id;
+          pushStep("buyer_create", { ok: true, buyerId: id });
+          await refreshBuyers();
+          if (id != null) document.getElementById("buyerSelect").value = String(id);
+        }
+
+        async function loadTransactions() {
+          const res = await api("/transactions");
+          document.getElementById("txLog").textContent = JSON.stringify(
+            res.status === 200 ? res.payload : { httpStatus: res.status, payload: res.payload },
+            null,
+            2
+          );
+          return res;
+        }
+
+        async function runDiscoverOnly() {
+          trace.length = 0;
+          const b = baseUrl();
+          const prompt = document.getElementById("agentPrompt").value.trim();
+          const budget = Number(document.getElementById("budget").value || "0.05");
+          const desiredTool = document.getElementById("desiredTool").value;
+          const maxResults = Number(document.getElementById("maxResults").value || "5");
+          const res = await api("/marketplace/discover", {
+            method: "POST",
+            body: JSON.stringify({ prompt, budgetUSDC: budget, desiredTool, maxResults }),
+          });
+          pushStep("discover", { httpStatus: res.status, candidateCount: (res.payload.candidates || []).length });
+          if (res.status !== 200) return { discoverRes: res, candidates: [] };
+          const rows = res.payload.candidates || [];
+          const candidates = [];
+          for (const row of rows) {
+            try {
+              candidates.push(candidateFromDiscoverRow(b, row));
+            } catch (e) {
+              pushStep("candidate_parse_error", { message: String(e) });
+            }
+          }
+          pushStep("candidates_normalized", { count: candidates.length, toolKeys: candidates.map((c) => c.toolKey) });
+          return { discoverRes: res, candidates };
+        }
+
+        async function runFullFlow() {
+          trace.length = 0;
+          const replyBox = document.getElementById("replyBox");
+          replyBox.textContent = "";
+          replyBox.className = "reply empty";
+          replyBox.textContent = "Running…";
+
+          const includeBuyerId = document.getElementById("includeBuyerId").checked;
+          const buyerIdStr = document.getElementById("buyerSelect").value;
+          if (includeBuyerId && !buyerIdStr) {
+            pushStep("validate", { ok: false, error: "Select a buyer (or create one) when including buyerId." });
+            replyBox.textContent = "Select a buyer first.";
+            replyBox.className = "reply empty";
+            setStatus("Select a buyer for the Arc settlement path.", false);
+            return;
+          }
+
+          const b = baseUrl();
+          const prompt = document.getElementById("agentPrompt").value.trim();
+          const budget = Number(document.getElementById("budget").value || "0.05");
+          const taskHint = document.getElementById("taskHint").value;
+          const desiredTool = document.getElementById("desiredTool").value;
+          const maxResults = Number(document.getElementById("maxResults").value || "5");
+
+          const txBefore = await api("/transactions");
+          const nBefore = txBefore.status === 200 ? eventCount(txBefore.payload) : null;
+          pushStep("transactions_before", { httpStatus: txBefore.status, eventCount: nBefore });
+
+          const disc = await api("/marketplace/discover", {
+            method: "POST",
+            body: JSON.stringify({ prompt, budgetUSDC: budget, desiredTool, maxResults }),
+          });
+          pushStep("discover", {
+            httpStatus: disc.status,
+            candidateCount: (disc.payload.candidates || []).length,
+          });
+          if (disc.status !== 200) {
+            replyBox.textContent = "Discover failed — see trace.";
+            replyBox.className = "reply empty";
+            setStatus("Discover request failed.", false);
+            await loadTransactions();
+            return;
+          }
+
+          const rows = disc.payload.candidates || [];
+          const candidates = [];
+          for (const row of rows) {
+            try {
+              candidates.push(candidateFromDiscoverRow(b, row));
+            } catch (e) {
+              pushStep("candidate_parse_error", { message: String(e) });
+            }
+          }
+
+          const toolsRes = await api("/marketplace/tools");
+          const fallback = [];
+          if (toolsRes.status === 200) {
+            for (const t of toolsRes.payload.tools || []) {
+              try {
+                fallback.push(candidateFromTool(b, t));
+              } catch (_) {}
+            }
+          }
+          pushStep("marketplace_tools", { httpStatus: toolsRes.status, fallbackCount: fallback.length });
+
+          const desired = desiredToolFromPrompt(taskHint, prompt);
+          const { tool, reason } = pickBest(desired, budget, candidates, fallback);
+          pushStep("pick_best", { desiredTool: desired, reason, tool: tool ? { toolKey: tool.toolKey, priceUSDC: tool.priceUSDC, invokeUrl: tool.invokeUrl } : null });
+
+          if (!tool) {
+            replyBox.textContent = "No tool fits the budget — raise budget or register cheaper tools.";
+            replyBox.className = "reply empty";
+            setStatus(reason, false);
+            await loadTransactions();
+            return;
+          }
+
+          const body = { prompt, selectedSkills: firstSkillKeys(tool, 2) };
+          if (includeBuyerId) body.buyerId = parseInt(buyerIdStr, 10);
+
+          const invokePath = pathFromInvokeUrl(tool.invokeUrl, b);
+          const inv = await api(invokePath, {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          if (inv.status !== 200) {
+            pushStep("invoke", { httpStatus: inv.status, invokeUrl: tool.invokeUrl, payload: inv.payload });
+          } else {
+            pushStep("invoke", { httpStatus: inv.status, payment: inv.payload.payment, preview: (inv.payload.outputText || "").slice(0, 400) });
+          }
+
+          const txAfter = await api("/transactions");
+          const nAfter = txAfter.status === 200 ? eventCount(txAfter.payload) : null;
+          pushStep("transactions_after", { httpStatus: txAfter.status, eventCount: nAfter, delta: nBefore != null && nAfter != null ? nAfter - nBefore : null });
+
+          document.getElementById("txLog").textContent = JSON.stringify(
+            txAfter.status === 200 ? txAfter.payload : { httpStatus: txAfter.status, payload: txAfter.payload },
+            null,
+            2
+          );
+
+          if (inv.status === 200 && inv.payload && inv.payload.outputText != null) {
+            replyBox.textContent = inv.payload.outputText;
+            replyBox.className = "reply";
+            setStatus("Flow completed successfully.", true);
+          } else {
+            replyBox.textContent =
+              typeof inv.payload === "string"
+                ? inv.payload.slice(0, 1200)
+                : JSON.stringify(inv.payload, null, 2).slice(0, 1200);
+            replyBox.className = "reply";
+            setStatus("Invoke returned HTTP " + inv.status, inv.status === 200);
+          }
+        }
+
+        document.getElementById("createBuyerBtn").addEventListener("click", async () => {
+          await createBuyer();
+          setStatus("Buyer created or see trace for errors.", trace.some((t) => t.ok === false) ? false : true);
+        });
+        document.getElementById("refreshBuyersBtn").addEventListener("click", refreshBuyers);
+        document.getElementById("transactionsBtn").addEventListener("click", loadTransactions);
+
+        document.getElementById("discoverOnlyBtn").addEventListener("click", async () => {
+          trace.length = 0;
+          setStatus("Discovering…", null);
+          const r = await runDiscoverOnly();
+          if (r.discoverRes && r.discoverRes.status === 200) setStatus("Discover OK — see trace.", true);
+          else setStatus("Discover failed.", false);
+        });
+
+        document.getElementById("runFlowBtn").addEventListener("click", async () => {
+          const btn = document.getElementById("runFlowBtn");
+          btn.disabled = true;
+          setStatus("Running agent flow…", null);
+          try {
+            await runFullFlow();
+          } catch (e) {
+            pushStep("fatal", { error: String(e) });
+            setStatus(String(e), false);
+            document.getElementById("replyBox").textContent = String(e);
+            document.getElementById("replyBox").className = "reply";
+          } finally {
+            btn.disabled = false;
+          }
+        });
+
+        refreshBuyers();
+        setTrace();
+      })();
+    </script>
+  </body>
+</html>
