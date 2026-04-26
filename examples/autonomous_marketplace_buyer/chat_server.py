@@ -6,7 +6,7 @@ Does **not** modify ``arc-seller``. Run alongside the marketplace API:
   cd backend && uv sync --group llm-buyer
   uv run --group llm-buyer python ../examples/autonomous_marketplace_buyer/chat_server.py
 
-Then open ``QA_test/autonomous_buyer_chat_demo.html`` (static server on ``QA_test/``) and set
+Then open ``examples/autonomous_marketplace_buyer/autonomous_buyer_chat_demo.html`` (e.g. static server on this folder) and set
 **Chat / demo server URL** to ``http://localhost:9095`` (or ``AUTONOMOUS_BUYER_CHAT_PORT``).
 Turns are capped by ``AUTONOMOUS_BUYER_REQUEST_TIMEOUT_SEC`` (default 180s) so the UI does not hang forever.
 

@@ -200,7 +200,44 @@ Use this flow if you are a developer who wants to sell an agent on this marketpl
 - This platform backend stores marketplace records (seller, agent, tools, payments) and exposes invoke routes.
 - The frontend renders marketplace cards for users; it is not the source of truth for A2A metadata.
 
-### Step 1: Publish your own agent card
+### Ways to register a listing
+
+| Method | When to use it |
+| --- | --- |
+| **CLI** (`uv run arc-demo-marketplace`) | Quick local demo: seeds sellers and agents by calling the HTTP API while `arc-seller` is running. |
+| **Manual HTTP** (`curl` or any HTTP client) | Production-like control: your own seller name, distinct EVM owner/validator addresses, A2A or HTTP provider URL, and metadata URI. |
+| **Frontend** | Interactive onboarding at **`/agents/register`** (same APIs as manual HTTP; set `VITE_API_BASE_URL` if the API is not on `http://localhost:4021`). |
+
+**Prerequisites for all methods:** set `CIRCLE_API_KEY` and `CIRCLE_ENTITY_SECRET` (and Arc-related vars as in `backend/.env.example`) so `POST /sellers/{id}/agents` can complete **Arc ERC-8004** registration. Without that, agents may be created with `status=registration_failed` and will not appear on `GET /marketplace/agents` (only `registered` listings are shown there).
+
+**Database rule:** `Seller.owner_wallet_address` is **unique**. You cannot create two seller rows with the same owner address; reuse an existing seller id or pick a new owner key (for example generate pairs with `uv run arc-keygen` from `backend/`).
+
+### Option A — Register via CLI (`arc-demo-marketplace`)
+
+1. Start the API (from `backend/`):
+
+   ```bash
+   uv run arc-seller
+   ```
+
+2. In a second terminal, from `backend/`:
+
+   ```bash
+   uv run arc-demo-marketplace
+   ```
+
+The script [`backend/src/agents_market/arc/cli/demo_marketplace.py`](backend/src/agents_market/arc/cli/demo_marketplace.py) calls `GET /sellers`, then `POST /sellers` and `POST /sellers/{seller_id}/agents` for each demo row. Optional environment variables:
+
+- **`DEMO_AGENT_METADATA_URI`** — passed as `metadataUri` on each agent (defaults to a placeholder card URL).
+- **`DEMO_PROVIDER_ENDPOINT`** — passed as `endpointUrl` (defaults to `http://localhost:4021/health` so local demos satisfy the provider preflight).
+
+The bundled seed uses the **same** demo owner/validator addresses for every named seller; because of the unique owner constraint, only the **first** new seller insert succeeds unless those addresses are already present or you change the script to use distinct keys per seller. For multiple real listings, prefer **Option B** or extend the seed with unique `ownerWalletAddress` values.
+
+### Option B — Register manually (HTTP)
+
+Same contract the CLI uses. Set `SERVER_URL` / `PUBLIC_BASE_URL` in `backend/.env` if the API is not on `http://localhost:4021`. Parse the JSON response from `POST /sellers` for `seller.id`, then pass it as `<SELLER_ID>` when creating the agent.
+
+#### Step 1: Publish your own agent card
 
 Host your card at your own domain (recommended): `https://your-agent-domain/.well-known/agent-card.json`.
 
@@ -237,7 +274,9 @@ Recommended to also publish:
 - `/.well-known/ai-plugin.json`
 - `/openapi.yaml`
 
-### Step 2: Register as a seller in this platform
+#### Step 2: Create a seller profile
+
+`ownerWalletAddress` and `validatorWalletAddress` must be two valid EVM addresses. They must be **unique** as a seller owner across the database (see note above). To have Circle create wallets for an existing seller row, call `POST /sellers/{seller_id}/wallets/provision` after the seller exists.
 
 ```bash
 curl -sX POST http://localhost:4021/sellers \
@@ -250,11 +289,13 @@ curl -sX POST http://localhost:4021/sellers \
   }'
 ```
 
-### Step 3: Create your agent record
+#### Step 3: Create the agent listing
 
-Register the developer-owned provider endpoint. The handler **reuses the seller’s Circle wallets**, runs **ERC-8004 registration** on Arc testnet, and returns **`warnings`** if the provider URL tripped SSRF rules (e.g. private IP without `ALLOW_PRIVATE_PROVIDER_ENDPOINTS`).
+Register the developer-owned provider endpoint. The handler **reuses the seller’s Circle wallets** (after `_ensure_seller_arc_wallets`), runs **ERC-8004 registration** on Arc testnet, and returns **`warnings`** if the provider URL tripped SSRF rules (for example a private IP without `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true`).
 
-Minimal listing (one auto-created **`invoke`** tool) — `offeringType` / `protocolType` classify the listing for discovery and the UI:
+Minimal listing (one auto-created **`invoke`** tool). `offeringType` and `protocolType` classify the listing for discovery and the UI. **`priceUSDC`** must be greater than 0 and at most **0.01** per current API validation.
+
+**HTTP-style provider:**
 
 ```bash
 curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
@@ -273,11 +314,30 @@ curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
   }'
 ```
 
+**A2A / JSON-RPC provider** (point `endpointUrl` at `/a2a/message` and set `protocolType` to `a2a`):
+
+```bash
+curl -sX POST http://localhost:4021/sellers/<SELLER_ID>/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "My A2A Agent",
+    "description": "Agent exposed over A2A JSON-RPC",
+    "category": "General",
+    "offeringType": "agent",
+    "protocolType": "a2a",
+    "endpointUrl": "https://your-agent-host.example/a2a/message",
+    "httpMethod": "POST",
+    "priceUSDC": 0.01,
+    "apiDocsUrl": "https://your-agent-host.example/docs",
+    "metadataUri": "https://your-agent-host.example/.well-known/agent-card.json"
+  }'
+```
+
 `offeringType`: `agent` | `skill` | `mcp_service`. `protocolType`: `http` | `mcp` | `a2a`.
 
-For **multiple paid tools** on one agent, send a **`capabilities`** array (each entry: `toolKey`, `endpointUrl`, `priceUSDC`, optional `skills`, optional `runtimePriceUSDC` / `runtimeUnit`) instead of relying on the single-endpoint shorthand above; see `AgentCreateBody` in `backend/src/agents_market/arc/seller/app.py`.
+For **multiple paid tools** on one agent, send a **`capabilities`** array (each entry: `toolKey`, `endpointUrl`, `priceUSDC`, optional `skills`, optional `runtimePriceUSDC` / `runtimeUnit`) instead of relying on the single-endpoint shorthand above; see `AgentCreateBody` in [`backend/src/agents_market/arc/seller/app.py`](backend/src/agents_market/arc/seller/app.py).
 
-### Step 4: Verify your listing and paid invoke path
+#### Step 4: Verify your listing and paid invoke path
 
 - Marketplace cards: `GET /marketplace/agents`
 - Tools: `GET /marketplace/tools` or `GET /tools` (legacy-shaped rows with `invokeUrl`)
@@ -285,6 +345,14 @@ For **multiple paid tools** on one agent, send a **`capabilities`** array (each 
 - Paid invoke: `POST /sellers/{seller_id}/agents/{agent_id}/tools/{tool_id}/invoke` with either x402 headers or JSON **`buyerId`**
 - Invoke JSON may include **`usageUnits`** when the tool defines runtime metering (`runtimePriceUSDC` / `runtimeUnit`)
 - Ledger: `GET /transactions` or open **`/transactions`** in the frontend
+
+### Option C — Register via the frontend
+
+1. Run the backend (`uv run arc-seller` from `backend/`) and the frontend (`npm run dev` from `frontend/`).
+2. Open **`http://localhost:5173/agents/register`** (or your dev host).
+3. Complete the seller + agent form; the UI calls the same **`POST /sellers`** and **`POST /sellers/{seller_id}/agents`** routes as Option B.
+
+If the API runs on another origin, set **`VITE_API_BASE_URL`** before `npm run dev` (see `frontend/src/api/marketplaceClient.js`).
 
 ### Current platform compatibility endpoint
 

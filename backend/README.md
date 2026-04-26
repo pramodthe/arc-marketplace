@@ -67,7 +67,7 @@ Ensure the backend image/runtime includes `circlekit`; otherwise x402 invokes wi
 ## QA and smoke validation
 
 ```bash
-# QA-only suites are maintained under ../QA_test (do not modify during backend cleanup).
+# Example-folder QA: ../examples/autonomous_marketplace_buyer/seller_marketplace_qa.py
 # For deployment checks, run backend + frontend smoke flows:
 uv run arc-seller
 # then verify /health, /marketplace/agents, paid invoke paths, and /transactions
@@ -348,7 +348,7 @@ If you only want **source access** without installing the full backend wheel (wh
 
 ### In-repo demo: test buyer chatbot
 
-The interactive QA buyer under [`../QA_test/buyer_agent/`](../QA_test/buyer_agent/) uses the same SDK for marketplace discovery and for `simulate` / `onchain` invokes against marketplace URLs. The built-in CLI buyer (`uv run arc-buyer`, [`src/agents_market/arc/buyer/run.py`](src/agents_market/arc/buyer/run.py)) also uses `BuyerMarketplaceSDK` directly.
+Headless SDK smoke: [`../examples/autonomous_marketplace_buyer/buyer_agent_chatbot_sdk_qa.py`](../examples/autonomous_marketplace_buyer/buyer_agent_chatbot_sdk_qa.py) (discover → invoke with `buyerId`). The built-in CLI buyer (`uv run arc-buyer`, [`src/agents_market/arc/buyer/run.py`](src/agents_market/arc/buyer/run.py)) also uses `BuyerMarketplaceSDK` directly.
 
 ## Alembic migrations
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """QA: simulate an AI chatbot buyer agent using BuyerMarketplaceSDK.
 
-Run from repo root or backend/:
+Run from ``backend/`` (so ``agents_market`` imports resolve):
 
-  cd backend && uv run python ../QA_test/buyer_agent_chatbot_sdk_qa.py
+  cd backend && uv run python ../examples/autonomous_marketplace_buyer/buyer_agent_chatbot_sdk_qa.py
 
 Env (optional):
   SERVER_URL / QA_BASE_URL — marketplace API base (default http://localhost:4021)
@@ -28,8 +28,9 @@ from typing import Any
 
 import httpx
 
-# Allow running as `uv run python ../QA_test/...` from backend/
-_BACKEND_SRC = Path(__file__).resolve().parents[1] / "backend" / "src"
+# Repo root: .../agents_market (this file lives under examples/autonomous_marketplace_buyer/)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_SRC = _REPO_ROOT / "backend" / "src"
 if _BACKEND_SRC.is_dir() and str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
@@ -136,6 +137,23 @@ async def main_async(args: argparse.Namespace) -> int:
                     "step": "invoke",
                     "httpStatus": exc.response.status_code,
                     "body": exc.response.text[:800],
+                    "transactionsBefore": before_n,
+                    "transactionsAfter": after_n,
+                    "latestEvents": _summarize_events(after),
+                },
+                indent=2,
+            )
+        )
+        return 1
+    except RuntimeError as exc:
+        after = await _fetch_transactions_json(server_url)
+        after_n = len(after.get("events") or [])
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "step": "invoke",
+                    "error": str(exc)[:1200],
                     "transactionsBefore": before_n,
                     "transactionsAfter": after_n,
                     "latestEvents": _summarize_events(after),

@@ -2,7 +2,7 @@
 """CLI entry for the autonomous LLM marketplace buyer (example folder only).
 
 Implementation: ``autonomous_llm_runner.py`` in this directory. Chat UI: ``chat_server.py`` +
-``QA_test/autonomous_buyer_chat_demo.html``.
+``autonomous_buyer_chat_demo.html`` (same folder).
 """
 
 from __future__ import annotations

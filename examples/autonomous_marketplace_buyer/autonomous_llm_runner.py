@@ -239,6 +239,8 @@ Rules:
 - Always discover (or list) before invoke unless the user only asked about marketplace health.
 - Use only invoke URLs returned by the tools; do not invent URLs.
 - If every tool exceeds budget, say so and suggest raising budget or narrowing the task.
+- If the user restricts to one named agent or product (e.g. "SkyRoute only"), reflect that in the discover intent and never invoke another agent's tool. Prefer setting env MARKETPLACE_AGENT_NAME_SUBSTRING to a short substring of that agent's registered name so discover/list stay scoped.
+- When the user gives a max USDC (e.g. "max 0.05 USDC"), use that value as budget_usdc in discover_marketplace (still within tool limits).
 """
 
 

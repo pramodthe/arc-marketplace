@@ -43,7 +43,7 @@ cd backend
 uv run --group llm-buyer python ../examples/autonomous_marketplace_buyer/chat_server.py
 ```
 
-4. From **`QA_test/`**: `python3 -m http.server 8080` → open **`http://localhost:8080/autonomous_buyer_chat_demo.html`**. Set **Chat server URL** to **`http://localhost:9095`** (or your **`AUTONOMOUS_BUYER_CHAT_PORT`**).
+4. From **`examples/autonomous_marketplace_buyer/`**: `python3 -m http.server 8080` → open **`http://localhost:8080/autonomous_buyer_chat_demo.html`**. Set **Chat server URL** to **`http://localhost:9095`** (or your **`AUTONOMOUS_BUYER_CHAT_PORT`**).
 
 ## Install (LangChain deps are optional on the main wheel)
 
@@ -102,6 +102,29 @@ echo "Compare summarize vs weather tools for a one-line update." | uv run --grou
 
 ## Relation to other demos
 
-- **[`QA_test/buyer_agent_chatbot_demo.html`](../../QA_test/buyer_agent_chatbot_demo.html)** — browser-only **orchestration** (no LLM). Good for click-through demos of HTTP flow.
-- **This script** — **LLM + tools** for a realistic autonomous buyer story.
+- **`buyer_agent_chatbot_sdk_qa.py`** — headless **BuyerMarketplaceSDK** flow (discover → pick → invoke with `buyerId`). No LLM; good for smoke checks from `backend/` (see [Manual QA scripts](#manual-qa-scripts)).
+- **`run_agent.py` / `chat_server.py`** — **LLM + tools** for a realistic autonomous buyer story.
 - Stub **provider** endpoints (fixed `outputText` templates) are fine for integration testing; this agent supplies the **autonomous** layer on the buyer side.
+
+## Manual QA scripts
+
+Same folder as this README; run marketplace checks with **`arc-seller`** already up.
+
+**Seller + marketplace smoke** (`QA_BASE_URL`, optional `QA_SELLER_PROVIDER_URL`, etc.):
+
+```bash
+# from repo root (uses backend venv / deps)
+uv run --directory backend python ../examples/autonomous_marketplace_buyer/seller_marketplace_qa.py
+```
+
+**SDK-only buyer invoke** (reuse **`BUYER_ID`** for funded settlement):
+
+```bash
+cd backend
+export BUYER_ID="1"
+uv run python ../examples/autonomous_marketplace_buyer/buyer_agent_chatbot_sdk_qa.py
+```
+
+Optional flags: `--server-url`, `--buyer-id`, `--prompt`, `--budget`, `--no-buyer-id` (x402 path; SDK does not sign). See script docstrings.
+
+**Seller card reference** for demos: [`seller.md`](seller.md).
